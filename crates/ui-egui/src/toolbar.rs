@@ -301,6 +301,34 @@ const REPORT_TEXT_X: f32 = 29.0;
 /// The application bar's height: the window's title bar on desktop builds.
 pub const APP_BAR_HEIGHT: f32 = 34.0;
 
+#[cfg(any(feature = "brand-hasisolid", feature = "brand-mssolid"))]
+fn paint_product_mark(ui: &egui::Ui, center: egui::Pos2) {
+    #[cfg(feature = "brand-hasisolid")]
+    let bytes: &[u8] = include_bytes!("../../../assets/brands/hasisolid/app.png");
+    #[cfg(all(feature = "brand-mssolid", not(feature = "brand-hasisolid")))]
+    let bytes: &[u8] = include_bytes!("../../../assets/brands/mssolid/app.png");
+    let id = egui::Id::new("sc_product_brand_texture");
+    let existing = ui.ctx().data_mut(|data| data.get_temp::<Option<egui::TextureHandle>>(id));
+    let texture = match existing {
+        Some(texture) => texture,
+        None => {
+            let texture = image::load_from_memory(bytes).ok().map(|image| {
+                let image = image.to_rgba8();
+                let size = [image.width() as usize, image.height() as usize];
+                let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+                ui.ctx().load_texture("sc_product_brand", color, egui::TextureOptions::LINEAR)
+            });
+            ui.ctx().data_mut(|data| data.insert_temp(id, texture.clone()));
+            texture
+        }
+    };
+    if let Some(texture) = texture {
+        let rect = Rect::from_center_size(center, vec2(20.0, 20.0));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+    }
+}
+
 pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     let app_bar = Container::new(ui.ctx(), Surface::ApplicationBar).edge("sc_appbar", Edge::Top);
@@ -318,13 +346,16 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         // (viewBox 357 x 412). Same 20 px height and centre as the old block.
         {
             let c = pos2(left + 20.0, r.center().y);
+            #[cfg(any(feature = "brand-hasisolid", feature = "brand-mssolid"))]
+            paint_product_mark(ui, c);
+            #[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
             crate::icons::glyphs::brand_mark(ui.painter(), c);
         }
         if !compact_actions {
             ui.painter().text(
                 pos2(left + 36.0, r.center().y),
                 Align2::LEFT_CENTER,
-                "SolidCraft",
+                solidcraft_engine::product::PRODUCT.name,
                 crate::fonts::semibold(t.font_heading),
                 t.app_bar_text,
             );
@@ -722,6 +753,14 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                 if item_if(ui, "Export STEP…", &step_key, "export", shown) {
                     FileAction::Command("file.export_step").run(app);
                     close = true;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if app.services.find_viewer.is_some() && app.services.launch_viewer.is_some() {
+                    let label = crate::i18n::format("family.open_viewer", &[("viewer", crate::companion::viewer_name())]);
+                    if item_if(ui, &label, "", "export", shown && app.companion_job.is_none()) {
+                        crate::companion::start(app, ctx.clone());
+                        close = true;
+                    }
                 }
                 if item_if(ui, app.tr_label("Export Current View as DXF…"), "", "export", shown) {
                     FileAction::Command("file.export_view_dxf").run(app);

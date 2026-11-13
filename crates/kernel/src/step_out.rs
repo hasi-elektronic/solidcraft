@@ -1621,6 +1621,32 @@ thread_local! {
     static MERGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Detect cycles and excessive occurrence depth without revisiting shared subassemblies.
+fn component_depth(products: &[ExportProduct], root: usize) -> Option<usize> {
+    fn visit(products: &[ExportProduct], id: usize, depth: usize, state: &mut [u8], height: &mut [usize]) -> Option<usize> {
+        if depth > 64 {
+            return None;
+        }
+        match *state.get(id)? {
+            1 => return None,
+            2 => {
+                let remaining = *height.get(id)?;
+                return (depth.saturating_add(remaining) <= 64).then_some(remaining);
+            }
+            _ => {}
+        }
+        *state.get_mut(id)? = 1;
+        let mut remaining = 0usize;
+        for (child, _, _) in &products.get(id)?.children {
+            remaining = remaining.max(visit(products, *child, depth + 1, state, height)?.saturating_add(1));
+        }
+        *state.get_mut(id)? = 2;
+        *height.get_mut(id)? = remaining;
+        Some(remaining)
+    }
+    visit(products, root, 0, &mut vec![0; products.len()], &mut vec![0; products.len()])
+}
+
 fn products_text(products: &[ExportProduct], root: usize, header: &StepHeader, merge: bool) -> Result<String> {
     if products.is_empty() || root >= products.len() {
         return Err(KernelError::Invalid("nothing to export".into()));
@@ -1636,17 +1662,7 @@ fn products_text(products: &[ExportProduct], root: usize, header: &StepHeader, m
             return Err(KernelError::Invalid("bad component reference".into()));
         }
     }
-    // No product may contain itself.
-    fn cyclic(products: &[ExportProduct], p: usize, stack: &mut Vec<usize>) -> bool {
-        if stack.contains(&p) || stack.len() > 64 {
-            return true;
-        }
-        stack.push(p);
-        let bad = products.get(p).is_some_and(|x| x.children.iter().any(|(c, _, _)| cyclic(products, *c, stack)));
-        stack.pop();
-        bad
-    }
-    if cyclic(products, root, &mut Vec::new()) {
+    if component_depth(products, root).is_none() {
         return Err(KernelError::Invalid("the component tree is recursive".into()));
     }
 
@@ -1846,6 +1862,33 @@ pub fn step_export_bodies(bodies: &[ExportBody], header: &StepHeader) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_depth_handles_shared_assemblies_cycles_and_depth_limit() {
+        let make = |count: usize| (0..count).map(|_| ExportProduct { name: String::new(), bodies: vec![], children: vec![] }).collect::<Vec<_>>();
+        let placement = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let mut shared = make(31);
+        for id in 0..30 {
+            shared[id].children.push((id + 1, placement, String::new()));
+            shared[id].children.push((id + 1, placement, String::new()));
+        }
+        assert_eq!(component_depth(&shared, 0), Some(30));
+        shared[30].children.push((0, placement, String::new()));
+        assert_eq!(component_depth(&shared, 0), None);
+
+        let mut chain = make(66);
+        for id in 0..65 {
+            chain[id].children.push((id + 1, placement, String::new()));
+        }
+        assert_eq!(component_depth(&chain[..65], 0), None); // child index 65 is outside this slice
+        chain[64].children.clear();
+        assert_eq!(component_depth(&chain, 0), Some(64));
+        // Cache the shared subtree through a short path, then visit it through a longer path.
+        chain[0].children.insert(0, (10, placement, String::new()));
+        assert_eq!(component_depth(&chain, 0), Some(64));
+        chain[64].children.push((65, placement, String::new()));
+        assert_eq!(component_depth(&chain, 0), None);
+    }
 
     #[test]
     fn islands_are_solids_of_their_own_not_voids() {

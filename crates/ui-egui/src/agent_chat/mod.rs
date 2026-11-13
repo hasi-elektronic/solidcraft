@@ -702,6 +702,7 @@ impl AgentChat {
                 }
                 // Arguments too large to show or read are left with the agent.
                 let input = input.filter(|v| serde_json::to_string(v).is_ok_and(|s| s.len() <= MAX_TOOL_INPUT));
+                let output = if status == Some(ToolStatus::Failed) { output.map(localize_mcp_error) } else { output };
                 let existing = self.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id: x, .. } if *x == id));
                 if let Some(Item::Tool { title: t, kind: k, status: s, input: i, output: o, .. }) = existing {
                     if let Some(v) = title {
@@ -826,7 +827,7 @@ impl AgentChat {
                 return Some(Outcome::TurnEnd);
             }
             Event::Error(e) => {
-                self.notice(e, true);
+                self.notice(localize_mcp_error(e), true);
                 match self.state() {
                     State::Starting | State::Failed => self.state = Some(State::Failed),
                     s if !s.running() => self.state = Some(State::Exited),
@@ -853,6 +854,21 @@ impl AgentChat {
         }
         None
     }
+}
+
+/// Translate our own backend failures on the UI thread, where the current language is known.
+fn localize_mcp_error(error: String) -> String {
+    let product = solidcraft_engine::product::PRODUCT.name;
+    let key = if error == format!("no {product} tools in this session") {
+        Some("ui.agent_mcp_no_tools")
+    } else if error == format!("the {product} tools stopped") {
+        Some("ui.agent_mcp_stopped")
+    } else if error == format!("the {product} tools did not answer") {
+        Some("ui.agent_mcp_timeout")
+    } else {
+        None
+    };
+    key.map_or(error, |key| trf(key, &[("product", product)]))
 }
 
 /// What an event asks of the app.
@@ -936,6 +952,15 @@ pub(crate) fn assistant_tip(app: &SolveApp, mark: AssistantMark) -> String {
 /// `solidcraft-cli` next to this program, else on the search path.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn find_cli() -> Option<std::path::PathBuf> {
+    if solidcraft_engine::product::PRODUCT.branded {
+        let product = solidcraft_engine::product::PRODUCT;
+        let name = if cfg!(windows) { format!("{}-cli.exe", product.name) } else { format!("{}-cli", product.xdg_folder) };
+        let key = format!("{}_CLI", product.name.to_ascii_uppercase());
+        if let Some(path) = std::env::var_os(key).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
+            return Some(path);
+        }
+        return std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name))).filter(|p| p.is_file());
+    }
     let name = if cfg!(windows) { "solidcraft-cli.exe" } else { "solidcraft-cli" };
     if let Some(p) = solidcraft_engine::geom::env::var("CLI").map(std::path::PathBuf::from).filter(|p| p.is_file()) {
         return Some(p);
@@ -1670,9 +1695,8 @@ fn on_permission(app: &mut SolveApp, key: u64, title: String, kind: Option<&str>
     let agent = app.agent_chat.running_id.clone();
     let mode = agents::mode_for(&app.preferences, &agent);
     let remembered = agents::always_allowed(&app.preferences, &agent, &title);
-    let why = if acp::is_bridge_tool(&title, kind) {
-        Some("ui.ai_auto_ours")
-    } else if remembered {
+    let _ = kind;
+    let why = if remembered {
         Some("ui.ai_auto_remembered")
     } else if mode == agents::Mode::All {
         Some("ui.ai_auto_mode")

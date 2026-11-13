@@ -1041,6 +1041,7 @@ fn confirm_routes_enter_escape_selected_answers_and_blocks_background_clicks() {
 fn save_prompt_frames_dont_save_and_clicking_it_discards_for_close_and_quit() {
     for quit in [false, true] {
         let mut h = crate::scenario::Harness::new();
+        h.app.preferences.language = "en".into();
         h.app.home.open = false;
         h.app.run("solid.box", serde_json::json!({"length": 10, "width": 10, "height": 10})).unwrap();
         if quit {
@@ -1069,7 +1070,7 @@ fn save_prompt_frames_dont_save_and_clicking_it_discards_for_close_and_quit() {
             output.textures_delta.clear();
         }
         h.output = output.platform_output.clone();
-        let discard = scenario::rect_of("dialog:apply").unwrap();
+        let discard = scenario::rect_of("dialog:cancel").unwrap();
         assert!(discard.contains(scenario::handle_at("dialog:Don't Save").unwrap()));
         assert!(
             h.output

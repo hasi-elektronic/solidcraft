@@ -7,7 +7,7 @@ use crate::SolveApp;
 use crate::ui_kit;
 use crate::ui_kit::{Container, Surface};
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = solidcraft_engine::product::PRODUCT.version;
 pub const COMMIT: &str = env!("SOLIDCRAFT_COMMIT");
 pub const BUILD_DATE: &str = env!("SOLIDCRAFT_BUILD_DATE");
 /// The user and developer guide (docs/book, published by .github/workflows/pages.yml).
@@ -30,7 +30,8 @@ pub fn diagnostics(app: &SolveApp) -> String {
     let renderer = if app.viewport.gpu.is_some() { "GPU" } else { "CPU" };
     let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     format!(
-        "SolidCraft {VERSION} ({COMMIT}, built {BUILD_DATE})\nOS: {} {}\nRenderer: {renderer}{}\nWindow: {}\nDesign: {} ({}, {})",
+        "{} {VERSION} ({COMMIT}, built {BUILD_DATE})\nOS: {} {}\nRenderer: {renderer}{}\nWindow: {}\nDesign: {} ({}, {})",
+        solidcraft_engine::product::PRODUCT.name,
         std::env::consts::OS,
         std::env::consts::ARCH,
         app.help.gpu.as_ref().map(|g| format!(", {g}")).unwrap_or_default(),
@@ -83,13 +84,20 @@ pub fn run(app: &mut SolveApp, ctx: &egui::Context, item: &str) {
 fn connect_assistants() -> Vec<String> {
     use solidcraft_engine::agent_setup as setup;
     let Some(cli) = crate::agent_chat::find_cli() else {
-        return vec!["solidcraft-cli was not found next to SolidCraft; run `solidcraft-cli mcp setup` from a terminal.".into()];
+        return vec![cli_not_found_message()];
     };
     let cli = cli.canonicalize().unwrap_or(cli).to_string_lossy().trim_start_matches(r"\\?\").to_owned();
     match setup::setup(&[], &setup::Env::from_process(), &cli) {
         Ok((lines, _)) => lines,
         Err(e) => vec![e],
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cli_not_found_message() -> String {
+    let product = solidcraft_engine::product::PRODUCT;
+    let cli = if cfg!(windows) && product.branded { format!("{}-cli", product.name) } else { format!("{}-cli", product.xdg_folder) };
+    crate::i18n::format("help.cli_not_found", &[("cli", &cli), ("product", product.name)])
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -170,15 +178,17 @@ fn about(app: &mut SolveApp, ctx: &egui::Context) {
     if !app.help.about {
         return;
     }
-    let (closed, action) = ui_kit::Window::new(egui::Id::new("sc_about"), "help", crate::i18n::tr_label("About SolidCraft"))
-        .cards(2.0)
-        .actions("", "Close", None)
-        .show(ctx, true, |ui| {
+    let title = crate::i18n::tr_label("About SolidCraft").replace("SolidCraft", solidcraft_engine::product::PRODUCT.name);
+    let (closed, action) =
+        ui_kit::Window::new(egui::Id::new("sc_about"), "help", &title).cards(2.0).actions("", "Close", None).show(ctx, true, |ui| {
             ui_kit::text(
                 ui,
                 &crate::i18n::format("help.build", &[("version", VERSION), ("commit", COMMIT), ("date", BUILD_DATE)]),
                 ui_kit::Text::Report("version", false),
             );
+            if solidcraft_engine::product::PRODUCT.branded {
+                ui_kit::text(ui, "SolidCraft 0.30.1 (8e2b0cd60d14b4152b12b8f1fdb2bcfdcd8c52f4)", ui_kit::Text::Note("upstream"));
+            }
             ui_kit::text(
                 ui,
                 crate::i18n::tr_label("Open-source parametric 3D CAD in Rust. Licensed MIT OR Apache-2.0."),
@@ -222,12 +232,26 @@ fn about(app: &mut SolveApp, ctx: &egui::Context) {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn missing_cli_message_is_localized_and_identifies_the_product() {
+        let product = solidcraft_engine::product::PRODUCT;
+        for (locale, expected) in [("en", "was not found"), ("de", "wurde nicht gefunden")] {
+            let _scope = crate::i18n::scope(locale);
+            let message = cli_not_found_message();
+            assert!(message.contains(expected), "{message}");
+            assert!(message.contains(product.name), "{message}");
+            assert!(message.contains("mcp setup"), "{message}");
+        }
+    }
+
     #[test]
     fn about_knows_its_build_and_diagnostics_say_where_it_runs() {
         assert!(!COMMIT.is_empty() && BUILD_DATE.len() == 10, "{COMMIT} {BUILD_DATE}");
         assert!(ATTRIBUTION.contains("ATTRIBUTION") || ATTRIBUTION.contains("Attribution"));
         let app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         let d = diagnostics(&app);
+        assert!(d.starts_with(solidcraft_engine::product::PRODUCT.name), "{d}");
         assert!(d.contains(VERSION) && d.contains(std::env::consts::OS) && d.contains("Renderer: CPU"), "{d}");
     }
 

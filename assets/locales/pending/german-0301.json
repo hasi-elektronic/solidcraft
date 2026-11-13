@@ -1,0 +1,13 @@
+{
+  "de": {
+    "cmd.component_hide_history": "Komponentenverlauf ausblenden",
+    "cmd.component_show_history": "Komponentenverlauf anzeigen",
+    "cmd.inspect_compare_picture": "Bild vergleichen",
+    "prefs.invert_curved_roll_arrows": "Gebogene Drehpfeile umkehren",
+    "prefs.invert_curved_roll_arrows_note": "Die beiden gebogenen Pfeile an der Ecke des Würfels drehen die Ansicht in der Bildschirmebene. Ein: Der Pfeil im Uhrzeigersinn dreht gegen den Uhrzeigersinn und umgekehrt. Aus: Jeder Pfeil dreht die Ansicht in seiner angezeigten Richtung.",
+    "ui.hide_component_history": "Verlauf ausblenden",
+    "ui.history_hide_hidden": "Ausgeblendete Komponenten verbergen",
+    "ui.history_show_hidden": "Ausgeblendete Komponenten anzeigen",
+    "ui.show_component_history": "Verlauf anzeigen"
+  }
+}

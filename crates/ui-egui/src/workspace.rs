@@ -313,8 +313,8 @@ pub const SECTIONS: &[Section] = &[
     Section {
         tab: "SHEET METAL",
         panel: "CREATE",
-        promoted: 4,
-        ids: &["sheet.flange", "sheet.path_flange", "sheet.hem", "sheet.fold", "sheet.perforate", "sheet.convert"],
+        promoted: 5,
+        ids: &["sheet.flange", "sheet.convert", "sheet.path_flange", "sheet.hem", "sheet.fold", "sheet.perforate"],
     },
     Section { tab: "SHEET METAL", panel: "FLAT", promoted: 3, ids: &["sheet.unfold", "sheet.refold", "sheet.flat_pattern"] },
     Section { tab: "SHEET METAL", panel: "OUTPUT", promoted: 2, ids: &["sheet.export_dxf", "sheet.export_bend_table"] },
@@ -437,6 +437,7 @@ pub const RIBBON_LABELS: &[(&str, &str)] = &[
     ("plastic.manage_rules", "Plastic Rules"),
     ("pointcloud.insert", "Point Clouds"),
     ("render.scene", "Scene"),
+    ("sheet.convert", "CONVERT"),
     ("sheet.export_bend_table", "Bend Table"),
     ("sheet.export_dxf", "Export DXF"),
     ("sheet.flat_pattern", "Flat Pattern"),
@@ -678,6 +679,12 @@ pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
         tabs.push("SKETCH");
     }
     tabs.extend(SPECIALTY_TABS.iter().map(|o| o.tab).filter(|tab| tab_turned_on(app, tab)));
+    if solidcraft_engine::product::PRODUCT.branded
+        && let Some(index) = tabs.iter().position(|tab| *tab == "SHEET METAL")
+    {
+        tabs.remove(index);
+        tabs.insert(0, "SHEET METAL");
+    }
     tabs
 }
 
@@ -882,7 +889,9 @@ mod tests {
         }
         for (s, (cmds, n)) in lists {
             assert!(
-                n <= 4 || (s.tab == "SKETCH" && ((s.panel == "CONSTRAIN" && n == 7) || (s.panel == "CREATE" && n == 5))),
+                n <= 4
+                    || (s.tab == "SKETCH" && ((s.panel == "CONSTRAIN" && n == 7) || (s.panel == "CREATE" && n == 5)))
+                    || (s.tab == "SHEET METAL" && s.panel == "CREATE" && n == 5),
                 "{}/{} promotes {n} commands",
                 s.tab,
                 s.panel
@@ -958,10 +967,26 @@ mod tests {
     }
 
     #[test]
+    fn branded_sheet_tab_starts_first_and_other_tabs_remain_available() {
+        let mut h = crate::scenario::Harness::new();
+        if solidcraft_engine::product::PRODUCT.branded {
+            assert_eq!(visible_tabs(&h.app).first(), Some(&"SHEET METAL"));
+            assert_eq!(h.app.ui.tab, "SHEET METAL");
+            assert!(visible_tabs(&h.app).contains(&"MODEL"));
+            set_tab_shown(&mut h.app, "SHEET METAL", false);
+            assert!(!visible_tabs(&h.app).contains(&"SHEET METAL"));
+        }
+    }
+
+    #[test]
     fn contextual_tabs_follow_the_active_body_and_allow_other_tabs() {
         let mut h = crate::scenario::Harness::new();
         let mut fresh = TABS.to_vec();
         fresh.extend(["SHEET METAL", "WELDMENTS"]);
+        if solidcraft_engine::product::PRODUCT.branded {
+            fresh.retain(|tab| *tab != "SHEET METAL");
+            fresh.insert(0, "SHEET METAL");
+        }
         assert_eq!(visible_tabs(&h.app), fresh, "SHEET METAL and WELDMENTS are reachable before any sheet body or member exists");
         h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
         assert_eq!(h.app.ui.tab, "SKETCH");
@@ -1038,8 +1063,11 @@ mod tests {
     #[test]
     fn standard_tabs_show_until_hidden_and_every_tab_can_be_hidden() {
         let mut h = crate::scenario::Harness::new();
+        h.app.preferences.language = "en".into();
         h.frames(2);
         assert!(h.app.preferences.hidden_toolbar_tabs.is_empty());
+        assert_eq!(h.app.ui.tab, if solidcraft_engine::product::PRODUCT.branded { "SHEET METAL" } else { "MODEL" });
+        h.step(&json!({"click":{"handle":"tab:MODEL"}})).unwrap();
         assert_eq!(h.app.ui.tab, "MODEL");
 
         // Hide the selected tab from its own menu: it leaves the row and the next tab is selected.
@@ -1048,7 +1076,11 @@ mod tests {
         h.frames(2);
         assert_eq!(h.app.preferences.hidden_toolbar_tabs, ["MODEL"]);
         assert!(crate::scenario::handle_at("tab:MODEL").is_none());
-        assert_eq!(h.app.ui.tab, "SURFACE", "the first tab still shown is selected");
+        assert_eq!(
+            h.app.ui.tab,
+            if solidcraft_engine::product::PRODUCT.branded { "SHEET METAL" } else { "SURFACE" },
+            "the first tab still shown is selected"
+        );
 
         // Settings › Layout lists the standard tabs too.
         h.call("ui.prefs", json!({"open":"Layout"}));
@@ -1106,8 +1138,11 @@ mod tests {
     #[test]
     fn specialty_tabs_show_by_default_and_stay_hidden_for_features() {
         let mut h = crate::scenario::Harness::new();
+        h.app.preferences.language = "en".into();
         h.frames(2);
-        assert_eq!(visible_tabs(&h.app), choosable_tabs().collect::<Vec<_>>());
+        let initial_tabs = visible_tabs(&h.app);
+        assert_eq!(initial_tabs.len(), choosable_tabs().count());
+        assert!(choosable_tabs().all(|tab| initial_tabs.contains(&tab)));
         h.step(&json!({"click":{"handle":"ribbon:add_tab"}})).unwrap();
         let rows: Vec<_> = crate::toolbar_custom::toolbar_items(&h.app).into_iter().filter(|i| i.id == "ui.toolbarTab").collect();
         assert_eq!(
@@ -1181,7 +1216,7 @@ mod tests {
         h.call("ui.prefs", json!({"button":"defaults"}));
         h.call("ui.prefs", json!({"button":"ok"}));
         assert!(h.app.preferences.hidden_toolbar_tabs.is_empty());
-        assert_eq!(visible_tabs(&h.app), choosable_tabs().collect::<Vec<_>>(), "defaults restore Sheet Metal and Weldments too");
+        assert_eq!(visible_tabs(&h.app), initial_tabs, "defaults restore Sheet Metal and Weldments too");
     }
 
     /// Parameters and Configurations are on the design tabs they were on before the redesign, and a
@@ -1207,9 +1242,13 @@ mod tests {
         let specs = solidcraft_engine::command_specs();
         let (create, _) = layout("SHEET METAL", "CREATE", &specs).unwrap();
         assert!(create.iter().any(|c| c.id == "sheet.convert"), "Convert to Sheet Metal is in the Sheet Metal tab's Create panel");
-        for id in ["sheet.flange", "parameters.change", "config.table"] {
+        for id in ["sheet.flange", "sheet.convert", "parameters.change", "config.table"] {
             assert!(crate::scenario::handle_at(&format!("button:{id}")).is_some(), "{id} is a button on the fresh Sheet Metal tab");
         }
+        h.step(&json!({"click":{"handle":"button:sheet.convert"}})).unwrap();
+        assert!(h.app.dialog.as_ref().is_some_and(|d| d.inputs.iter().any(|i| i.label == "Fixed Face")), "Convert opens its face-selection dialog");
+        h.app.dialog = None;
+        h.frames(2);
         h.step(&json!({"click":{"handle":"button:parameters.change"}})).unwrap();
         assert!(h.app.params.is_some(), "Parameters opens from the Sheet Metal tab");
         assert_eq!(h.app.ui.tab, "SHEET METAL", "and the tab stays");
@@ -1263,6 +1302,7 @@ mod tests {
     fn parameters_and_configurations_open_separately() {
         use serde_json::json;
         let mut h = crate::scenario::Harness::new();
+        h.app.preferences.language = "en".into();
         let specs = solidcraft_engine::command_specs();
         let (commands, _) = layout("MANAGE", "CONFIGURATIONS", &specs).unwrap();
         assert!(commands.iter().any(|c| c.id == "config.configure"));
@@ -1377,6 +1417,8 @@ mod tests {
             crate::scenario::check(h, e).unwrap_or_else(|err| panic!("{what}: {err}"));
         };
         let mut h = crate::scenario::Harness::new();
+        h.frames(2);
+        h.step(&json!({"click":{"handle":"tab:MODEL"}})).unwrap();
         h.call("ui.view", json!({"view": "iso"}));
         h.frames(3);
         h.step(&json!({"click": {"handle": "button:sketch.create"}})).unwrap();
@@ -1418,6 +1460,8 @@ mod tests {
     #[test]
     fn keys_keep_a_sketch_open_and_undo_after_finish_reopens_it() {
         let mut h = crate::scenario::Harness::new();
+        h.frames(2);
+        h.step(&json!({"click":{"handle":"tab:MODEL"}})).unwrap();
         h.frames(3);
         h.step(&json!({"start": "sketch.create"})).unwrap();
         h.step(&json!({"click": {"plane": "XY"}})).unwrap();

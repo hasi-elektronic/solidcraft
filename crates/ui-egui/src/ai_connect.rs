@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn it_is_on_by_default_and_saved_off_stays_off() {
-        assert!(crate::prefs::Prefs::default().connect_ai_apps);
+        assert_eq!(crate::prefs::Prefs::default().connect_ai_apps, !solidcraft_engine::product::PRODUCT.branded);
         let mut app = SolveApp::new(Default::default(), Default::default());
         app.load_prefs(&serde_json::json!({ "preferences": { "connect_ai_apps": false } }).to_string());
         assert!(!app.preferences.connect_ai_apps);

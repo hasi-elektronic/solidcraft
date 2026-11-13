@@ -102,6 +102,8 @@ crate::dialog_descriptor::dialog_descriptors! {
                 /// 0 is the rule's) and its size (empty: the rule's).
                 relief: usize,
                 relief_size: String,
+                /// Gap between this feature's flanges; empty follows the sheet rule.
+                corner_gap: String,
                 /// Edge flanges: further bends (angle, height, turns the other way), each a flange on
                 /// the far edge of the one before it (the command's `then`).
                 then: Vec<(String, String, bool)>,
@@ -111,6 +113,9 @@ crate::dialog_descriptor::dialog_descriptors! {
             },
             Convert {
                 rule: usize,
+                auto_bends: bool,
+                suggested_face: Option<(String, usize)>,
+                suggested_edges: Vec<Sel>,
             },
             /// The rule manager: the rule shown (index into the rules, or past the end for a new one).
             Rules {
@@ -181,6 +186,7 @@ fn new_flange(app: &SolveApp, ty: usize) -> Sm {
         own: Vec::new(),
         relief: 0,
         relief_size: String::new(),
+        corner_gap: String::new(),
         then: Vec::new(),
     }
 }
@@ -191,9 +197,10 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
         "sheet.flange" => (new_flange(app, 0), vec![SelInput::new("Profile / Edges", PROFILES | EDGES | CURVES, true)]),
         "sheet.unfold" => (Sm::Unfold { refold: false }, vec![SelInput::new("Body (last if none)", BODIES, false)]),
         "sheet.refold" => (Sm::Unfold { refold: true }, vec![SelInput::new("Body (last if none)", BODIES, false)]),
-        "sheet.convert" => {
-            (Sm::Convert { rule: 0 }, vec![SelInput::new("Fixed Face", PLANAR_FACES, false), SelInput::new("Bend Edges", EDGES, true)])
-        }
+        "sheet.convert" => (
+            Sm::Convert { rule: 0, auto_bends: true, suggested_face: None, suggested_edges: Vec::new() },
+            vec![SelInput::new("Fixed Face", PLANAR_FACES, false), SelInput::new("Bend Edges", EDGES, true)],
+        ),
         "sheet.manage_rules" => {
             let active = app.session.doc.sheet.active.clone();
             let rules = rule_list(app);
@@ -216,6 +223,46 @@ fn rule_list(app: &SolveApp) -> Vec<SheetRule> {
 pub(crate) fn design_rules(doc: &solidcraft_engine::doc::Document) -> Vec<SheetRule> {
     let r = &doc.sheet.rules;
     if r.is_empty() { vec![SheetRule::steel()] } else { r.clone() }
+}
+
+/// Suggest once per fixed face without changing the document or replacing manual picks.
+pub(crate) fn suggest_for_fixed_face(
+    app: &SolveApp,
+    inputs: &mut [SelInput],
+    seen: &mut Option<(String, usize)>,
+    suggested_edges: &mut Vec<Sel>,
+    enabled: bool,
+) {
+    let fixed = inputs.first().and_then(|input| input.items.first()).and_then(|selection| match selection {
+        Sel::Face { body, index, point } => Some((body.clone(), *index, *point)),
+        _ => None,
+    });
+    let key = fixed.as_ref().map(|(body, index, _)| (body.clone(), *index));
+    if seen.as_ref() == key.as_ref() {
+        return;
+    }
+    if let Some(edges) = inputs.get_mut(1) {
+        edges.items.retain(|item| !suggested_edges.iter().any(|auto| crate::selection::same_item(auto, item)));
+    }
+    suggested_edges.clear();
+    *seen = key;
+    let Some((body, _, point)) = fixed else { return };
+    if !enabled {
+        return;
+    }
+    let state = app.session.world_state();
+    if let Some(model) = state.body(&body) {
+        let suggested = solidcraft_engine::doc::sheet::suggest_bend_edges(model, point);
+        if let Some(edges) = inputs.get_mut(1) {
+            for (index, point) in suggested {
+                let edge = Sel::Edge { body: body.clone(), index, point };
+                if !edges.items.iter().any(|item| crate::selection::same_item(item, &edge)) {
+                    edges.items.push(edge.clone());
+                    suggested_edges.push(edge);
+                }
+            }
+        }
+    }
 }
 
 /// "(active rule)" and the rule names, for a rule box.
@@ -246,7 +293,23 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
     let t = Tokens::get();
     let mut enter = false;
     match k {
-        Sm::Flange { ty, height, angle, radius, position, height_from, flip, distance, reverse, rule, own, relief, relief_size, then } => {
+        Sm::Flange {
+            ty,
+            height,
+            angle,
+            radius,
+            position,
+            height_from,
+            flip,
+            distance,
+            reverse,
+            rule,
+            own,
+            relief,
+            relief_size,
+            corner_gap,
+            then,
+        } => {
             *ty = flange_type(inputs);
             form_row(ui, "Type", |ui| {
                 ui.label(FLANGE_TYPES.get(*ty).copied().map(crate::i18n::tr).unwrap_or(""));
@@ -289,6 +352,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
                         // The relief at the corners these flanges make: the rule's unless set here.
                         choice_row(ui, "Corner Relief Shape", "sm_flange_relief", relief, &FLANGE_RELIEF_LABELS);
                         enter |= hint_row(ui, "Corner Relief", relief_size, crate::i18n::tr_label("from the rule"));
+                        enter |= hint_row(ui, "Flange Gap", corner_gap, crate::i18n::tr_label("from the rule"));
                         // With several edges, a row for each: an angle and a height of its own, left
                         // empty for the values above (shown as the hints).
                         let points = edge_point_list(inputs);
@@ -373,7 +437,21 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
             enter |= hint_row(ui, "Bend Radius", radius, crate::i18n::tr_label("from the rule"));
         }
         Sm::Unfold { .. } => {}
-        Sm::Convert { rule } => rule_combo(app, ui, "sm_conv_rule", rule),
+        Sm::Convert { rule, auto_bends, suggested_face, suggested_edges } => {
+            rule_combo(app, ui, "sm_conv_rule", rule);
+            if crate::ui_kit::checkbox_row(ui, "sm_auto_bends", "ui.sheet_auto_bends", *auto_bends) {
+                *auto_bends = !*auto_bends;
+                if !*auto_bends && let Some(edges) = inputs.get_mut(1) {
+                    edges.items.retain(|item| !suggested_edges.iter().any(|auto| crate::selection::same_item(auto, item)));
+                    suggested_edges.clear();
+                }
+                *suggested_face = None;
+            }
+            suggest_for_fixed_face(app, inputs, suggested_face, suggested_edges, *auto_bends);
+            if *auto_bends {
+                crate::ui_kit::caption(ui, "ui.sheet_auto_bends", crate::i18n::tr("ui.sheet_auto_bends_review"));
+            }
+        }
         Sm::Rules { pick, name, values, relief, angles, active, loaded } => {
             let rules = rule_list(app);
             crate::rule_editor::rule_editor! {
@@ -409,6 +487,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
             }
             if *pick < rules.len()
                 && !app.session.doc.sheet.rules.is_empty()
+                && (!solidcraft_engine::product::PRODUCT.branded
+                    || rules.get(*pick).is_some_and(|selected| app.session.doc.sheet.rules.iter().any(|r| r.name != selected.name)))
                 && crate::ui_kit::button(ui, crate::i18n::tr_label("Delete rule"), crate::ui_kit::Button::Normal).clicked()
             {
                 let n = rules.get(*pick).map(|r| r.name.clone()).unwrap_or_default();
@@ -638,7 +718,23 @@ fn flange_edges(inputs: &[SelInput], own: &[(Vec3, String, String)]) -> Vec<Valu
 pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String, Value>) -> Result<Vec<(String, Value)>, String> {
     let s = &app.session;
     let (cmd, mut p): (&str, Value) = match k {
-        Sm::Flange { height, angle, radius, position, height_from, flip, distance, reverse, rule, own, relief, relief_size, then, .. } => {
+        Sm::Flange {
+            height,
+            angle,
+            radius,
+            position,
+            height_from,
+            flip,
+            distance,
+            reverse,
+            rule,
+            own,
+            relief,
+            relief_size,
+            corner_gap,
+            then,
+            ..
+        } => {
             let mut p = match flange_type(inputs) {
                 1 => {
                     let mut p = json!({"type": "edge", "edges": flange_edges(inputs, own), "height": height, "angle": angle,
@@ -651,6 +747,7 @@ pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String,
                         p["corner_relief_shape"] = json!(shape);
                     }
                     put(&mut p, &[("corner_relief", relief_size)]);
+                    put(&mut p, &[("corner_gap", corner_gap)]);
                     if !then.is_empty() {
                         let mut bends = Vec::with_capacity(then.len());
                         for (n, (a, h, other)) in then.iter().enumerate() {
@@ -750,10 +847,13 @@ pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String,
             }
             (if *refold { "sheet.refold" } else { "sheet.unfold" }, p)
         }
-        Sm::Convert { rule } => {
+        Sm::Convert { rule, .. } => {
             let Some(Sel::Face { body, point, .. }) = items(inputs, 0).first() else {
                 return Err("select the fixed face first (a plate's large face)".into());
             };
+            if items(inputs, 1).iter().any(|s| matches!(s, Sel::Edge { body: edge_body, .. } if edge_body != body)) {
+                return Err("all bend edges must belong to the fixed face's body".into());
+            }
             let mut p = json!({"body": body, "face": pt(*point)});
             // The sharp edges of a solid or shelled body that become bends (a plate has none).
             let bends: Vec<Value> = items(inputs, 1).edge_points().into_iter().map(pt).collect();
@@ -810,7 +910,19 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
             }
             (f, curves.iter().map(|id| crate::selection::curve_pick(id, sketch.0, app.session.active_sketch)).collect())
         }
-        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from } => {
+        FeatureKind::SheetFlange {
+            edges,
+            height,
+            angle,
+            radius,
+            position,
+            flip,
+            body,
+            corner_relief_shape,
+            corner_relief,
+            height_from,
+            corner_gap,
+        } => {
             if let Some(b) = body {
                 extra.insert("body".into(), json!(b));
             }
@@ -848,6 +960,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
                     .and_then(|name| RELIEF_SHAPES.iter().position(|s| s.eq_ignore_ascii_case(name.trim())))
                     .map_or(0, |i| i + 1),
                 relief_size: corner_relief.as_deref().map(str::to_string).unwrap_or_default(),
+                corner_gap: corner_gap.as_deref().map(str::to_string).unwrap_or_default(),
                 then: Vec::new(),
             };
             (f, picked)
@@ -909,7 +1022,11 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
             if let Some(i) = ins.get_mut(1) {
                 i.items = bends.iter().filter_map(|p| edge_sel(s, p.0)).collect();
             }
-            return Some((Kind::Sheet(Sm::Convert { rule: rule_index(rule) }), ins, extra));
+            return Some((
+                Kind::Sheet(Sm::Convert { rule: rule_index(rule), auto_bends: false, suggested_face: None, suggested_edges: Vec::new() }),
+                ins,
+                extra,
+            ));
         }
         _ => return None,
     };

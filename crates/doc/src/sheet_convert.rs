@@ -47,7 +47,7 @@
 //! edges that end at a bend or a cut edge, loops of bends, two faces that meet along more than
 //! one edge, a wall on part of an edge of a face other than the fixed one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use solidcraft_geom::{Loop2, Mesh, Plane, Region2, Ring, Seg2, UnitVec3, Vec2, Vec3};
@@ -425,6 +425,137 @@ fn other_skin(b: &Body, mesh: &Mesh, c: &Chamfer, tol: f64) -> Option<Chamfer> {
     beside_x
         .filter(|g| *g != x && *g != c.strip)
         .find_map(|g| bend_cylinder(b, mesh, g, tol).filter(|o| (o.a, o.b) == (x, y) || (o.a, o.b) == (y, x)))
+}
+
+/// Suggest the tangent edges of cylindrical bends reachable on the fixed face's skin.
+/// These are editable suggestions, not an authorization to convert or unfold the body.
+pub fn suggest_bend_edges(mb: &ModelBody, fixed: Vec3) -> Vec<(usize, Vec3)> {
+    let (body, mesh) = (&mb.body, mb.mesh());
+    let size = body.size();
+    if !(size.is_finite() && size > 0.0) || mesh.edges.len() > 1024 || mesh.triangles.len() > 50_000 {
+        return Vec::new();
+    }
+    let faces: BTreeSet<usize> = mesh.tri_face.iter().map(|f| *f as usize).collect();
+    if faces.len() > 256 {
+        return Vec::new();
+    }
+    let tol = (size * 1e-6).max(1e-6);
+    let near = (size * 2e-3).max(1e-3);
+    let Some((_, fixed_face)) = crate::appearance::nearest_face(mb, fixed).filter(|(d, _)| *d <= near) else { return Vec::new() };
+    let Ok(panel) = outline(body, &mesh, fixed_face, tol) else { return Vec::new() };
+    let Some((_, thickness)) = behind(body, &mesh, fixed_face).filter(|(_, t)| *t > 0.0 && t * t * 16.0 <= area_about(&panel.pts, panel.n)) else {
+        return Vec::new();
+    };
+    // Many bend faces share a panel. Its opposite skin is expensive to find, especially on
+    // perforated parts, so measure each candidate panel only once per request.
+    let mut thickness_cache = BTreeMap::new();
+    let mut same_thickness = |f| {
+        *thickness_cache.entry(f).or_insert_with(|| behind(body, &mesh, f).is_some_and(|(_, t)| (t - thickness).abs() <= 1e-6 * thickness.max(1.0)))
+    };
+    let mut candidates: Vec<Chamfer> = faces
+        .into_iter()
+        .filter_map(|face| bend_cylinder(body, &mesh, face, tol))
+        .filter(|bend| same_thickness(bend.a) && same_thickness(bend.b))
+        .collect();
+    let mut reached = BTreeSet::from([fixed_face]);
+    let mut suggested = Vec::new();
+    loop {
+        let mut changed = false;
+        candidates.retain(|bend| {
+            let from = if reached.contains(&bend.a) && !reached.contains(&bend.b) {
+                Some((bend.a, bend.b))
+            } else if reached.contains(&bend.b) && !reached.contains(&bend.a) {
+                Some((bend.b, bend.a))
+            } else {
+                None
+            };
+            let Some((panel, next)) = from else { return true };
+            let edge = mesh.edges.iter().zip(&mesh.edge_faces).enumerate().find_map(|(index, (line, faces))| {
+                if !faces.contains(&(panel as u32)) || !faces.contains(&(bend.strip as u32)) {
+                    return None;
+                }
+                Some((index, (*line.first()? + *line.last()?) * 0.5))
+            });
+            if let Some(edge) = edge {
+                suggested.push(edge);
+                reached.insert(next);
+                changed = true;
+                false
+            } else {
+                true
+            }
+        });
+        if !changed || suggested.len() >= MAX_BENDS {
+            break;
+        }
+    }
+    if unresolved_reachable_bend(&candidates, &reached) {
+        // A loop, repeated connection, or a bend without a usable edge needs a deliberate
+        // manual choice; never silently choose which bend to leave open.
+        Vec::new()
+    } else {
+        suggested
+    }
+}
+
+fn unresolved_reachable_bend(candidates: &[Chamfer], reached: &BTreeSet<usize>) -> bool {
+    candidates.iter().any(|bend| reached.contains(&bend.a) || reached.contains(&bend.b))
+}
+
+/// Measure a uniform thickness and inner radius from both cylindrical skins of every picked
+/// bend. Ambiguous, sharp, mixed-radius or unmatched bends return None; this does not infer the
+/// K factor or a corner gap.
+pub fn infer_bend_profile(mb: &ModelBody, fixed: Vec3, picks: &[Vec3]) -> Option<(f64, f64)> {
+    // Profile detection performs geometric searches for each pick. Keep it bounded and
+    // leave unusually complex or ambiguous parts to explicit rule selection.
+    if picks.is_empty() || picks.len() > 64 {
+        return None;
+    }
+    let (body, mesh) = (&mb.body, mb.mesh());
+    let size = body.size();
+    if !(size.is_finite() && size > 0.0) || mesh.edges.len() > 1024 || mesh.triangles.len() > 50_000 {
+        return None;
+    }
+    let tol = (size * 1e-6).max(1e-6);
+    let near = (size * 2e-3).max(1e-3);
+    let (_, fixed_face) = crate::appearance::nearest_face(mb, fixed).filter(|(distance, _)| *distance <= near)?;
+    let (_, thickness) = behind(body, &mesh, fixed_face).filter(|(_, t)| t.is_finite() && *t > 0.0)?;
+    let mut radius: Option<f64> = None;
+    let mut panel_thickness = BTreeMap::new();
+    for point in picks {
+        let bend = chamfer_at(mb, &mesh, *point, tol, near)?;
+        for panel in [bend.a, bend.b] {
+            let t = *panel_thickness.entry(panel).or_insert_with(|| behind(body, &mesh, panel).map(|(_, t)| t));
+            if !t.is_some_and(|t| t.is_finite() && (t - thickness).abs() <= (thickness * 1e-4).max(1e-4)) {
+                return None;
+            }
+        }
+        let other = other_skin(body, &mesh, &bend, tol)?;
+        let (Some(FaceSurface::Cylinder { origin: a, axis: x, radius: r1 }), Some(FaceSurface::Cylinder { origin: b, axis: y, radius: r2 })) =
+            (face_surface(body, bend.strip), face_surface(body, other.strip))
+        else {
+            return None;
+        };
+        let axis = x.normalized()?;
+        let other_axis = y.normalized()?;
+        let axis_delta = b - a;
+        if axis.cross(other_axis).len() > 1e-6
+            || (axis_delta - axis * axis_delta.dot(axis)).len() > tol.max(1e-4)
+            || !r1.is_finite()
+            || !r2.is_finite()
+            || r1 <= 0.0
+            || r2 <= 0.0
+            || ((r1 - r2).abs() - thickness).abs() > (thickness * 1e-4).max(1e-4)
+        {
+            return None;
+        }
+        let inner = r1.min(r2);
+        if radius.is_some_and(|r| (r - inner).abs() > (r.max(inner) * 1e-4).max(1e-4)) {
+            return None;
+        }
+        radius = Some(inner);
+    }
+    Some((thickness, radius?))
 }
 
 /// Face `g`'s outline with each picked chamfer along it taken out: the edge along the chamfer
@@ -1082,6 +1213,17 @@ pub fn convert_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_suggestions_refuse_an_unresolved_loop_or_parallel_bend() {
+        let reached = BTreeSet::from([0, 1, 2]);
+        let loop_bend = Chamfer { strip: 3, a: 2, b: 0 };
+        let parallel_bend = Chamfer { strip: 4, a: 0, b: 1 };
+        let disconnected = Chamfer { strip: 5, a: 6, b: 7 };
+        assert!(unresolved_reachable_bend(&[loop_bend], &reached));
+        assert!(unresolved_reachable_bend(&[parallel_bend], &reached));
+        assert!(!unresolved_reachable_bend(&[disconnected], &reached));
+    }
 
     #[test]
     fn edges_move_in_by_their_own_amounts_and_step_along_one_line() {

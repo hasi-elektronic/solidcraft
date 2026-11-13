@@ -1,0 +1,26 @@
+{
+  "ar": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "لا يمكن بعد نقل التكوينات أو الصور المرجعية أو خصائص الجزء أو المادة أو المظهر بأمان"
+  },
+  "he": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "עדיין לא ניתן להעביר בבטחה תצורות, תמונות ייחוס, מאפייני חלק, חומר או מראה"
+  },
+  "vi": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "Chưa thể chuyển an toàn cấu hình, ảnh tham chiếu, thuộc tính chi tiết, vật liệu hoặc hình thức"
+  },
+  "de": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "Konfigurationen, Referenzbilder, Teileigenschaften, Material oder Erscheinungsbild können noch nicht sicher übernommen werden"
+  },
+  "en": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "configurations, reference images, part properties, material or appearance cannot yet be transferred safely"
+  },
+  "ja": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "構成、参照画像、部品の属性、材料、外観はまだ安全に移行できません"
+  },
+  "ko": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "구성, 참조 이미지, 부품 속성, 재질 또는 모양을 아직 안전하게 전송할 수 없습니다"
+  },
+  "zh": {
+    "configurations, reference images, part properties, material or appearance cannot yet be transferred safely": "目前尚不能安全转移配置、参考图像、零件属性、材料或外观"
+  }
+}

@@ -1095,6 +1095,12 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
                         },
                         false,
                     );
+                    if request.kind == Kind::Open
+                        && made.result.get("read_only").and_then(Value::as_bool) != Some(true)
+                        && warnings.is_none_or(Vec::is_empty)
+                    {
+                        crate::edit_in_place::warn_shared(app);
+                    }
                 }
                 request.answer(Ok(made.result));
             }

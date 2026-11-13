@@ -3,6 +3,52 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 #[test]
+fn branded_updates_describe_own_packages() {
+    let _scope = crate::i18n::scope("de");
+    let note = branded_update_note();
+    if solidcraft_engine::product::PRODUCT.branded {
+        let note = note.expect("branded build has its own update message");
+        assert!(note.contains(current_version()), "{note}");
+        assert!(note.contains("Installationspakete"), "{note}");
+        assert!(!note.contains("Entwicklungs"), "{note}");
+    } else {
+        assert!(note.is_none());
+    }
+}
+
+#[cfg(any(feature = "brand-hasisolid", feature = "brand-mssolid"))]
+#[test]
+fn branded_preferences_hide_update_controls_and_never_start_a_check() {
+    let _scope = crate::i18n::scope("de");
+    let dir = scratch();
+    let (feed, _) = next_release_feed(&dir.0);
+    let mut h = crate::scenario::Harness::new();
+    h.app.updater.kind = Some(InstallKind::WindowsPortable);
+    h.app.updater.feed = Some(feed);
+    h.app.updater.release = Some(release());
+    h.app.services.http_get = Some(Arc::new(|_| panic!("branded build attempted an update request")));
+    h.app.services.http_download = Some(Arc::new(|_, _, _| panic!("branded build attempted an update download")));
+    h.app.preferences.check_updates = true;
+    assert!(!available(&mut h.app));
+    check_now(&mut h.app, &h.ctx);
+    tick(&mut h.app, &h.ctx);
+    start_install(&mut h.app, &h.ctx);
+    assert!(h.app.updater.rx.is_none());
+    assert!(h.app.updater.job.is_none());
+    assert_eq!(h.app.updater.status, Status::Idle);
+    let mut texts = Vec::new();
+    for _ in 0..2 {
+        let mut output = h.ctx.run_ui(egui::RawInput::default(), |ui| prefs_rows(&mut h.app, ui));
+        output.textures_delta.clear();
+        texts =
+            output.shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.text().to_string()) } else { None }).collect();
+    }
+    assert!(texts.iter().any(|t| t.contains("Installationspakete")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == crate::i18n::tr("update.check_automatically")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == crate::i18n::tr("update.check_now")), "{texts:?}");
+}
+
+#[test]
 fn versions_compare_as_semver() {
     assert!(is_newer("v0.10.0", "0.9.0"));
     assert!(is_newer("v0.10.0", "0.9.12"), "0.10 is after 0.9.12, not before it as text would sort");
@@ -315,6 +361,7 @@ fn next_release_feed(dir: &Path) -> (PathBuf, String) {
 }
 
 /// Frames until the check in flight has been collected.
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn wait_for_check(h: &mut crate::scenario::Harness) {
     for _ in 0..500 {
         h.frame();
@@ -327,6 +374,7 @@ fn wait_for_check(h: &mut crate::scenario::Harness) {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn a_new_launch_checks_even_when_the_last_check_was_today() {
     let dir = scratch();
     let (feed, version) = next_release_feed(&dir.0);
@@ -359,6 +407,7 @@ fn turning_off_automatic_checks_stops_the_launch_check() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn help_menu_checks_with_automatic_checks_off_and_offers_installation() {
     let dir = scratch();
     let (feed, version) = next_release_feed(&dir.0);
@@ -388,6 +437,7 @@ fn help_menu_checks_with_automatic_checks_off_and_offers_installation() {
 
 /// Hold an automatic check at its result channel so the manual request can join it without
 /// a second HTTP request or a wall-clock race.
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn pending_check() -> (crate::scenario::Harness, std::sync::mpsc::Sender<Result<Release, FetchError>>) {
     let mut h = crate::scenario::Harness::new();
     h.app.preferences.check_updates = false;
@@ -400,6 +450,7 @@ fn pending_check() -> (crate::scenario::Harness, std::sync::mpsc::Sender<Result<
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn help_check_shows_progress_and_up_to_date_then_closes() {
     let (mut h, tx) = pending_check();
     h.call("ui.help", json!({"item": "updates"}));
@@ -426,6 +477,7 @@ fn help_check_shows_progress_and_up_to_date_then_closes() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn help_check_reports_network_errors_and_rate_limits_in_the_window() {
     for error in [FetchError::Failed("offline".into()), FetchError::RateLimited { retry_after_s: 3600 }] {
         let (mut h, tx) = pending_check();
@@ -444,6 +496,7 @@ fn help_check_reports_network_errors_and_rate_limits_in_the_window() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn help_check_result_follows_the_selected_language() {
     let (mut h, tx) = pending_check();
     h.call("ui.prefs", json!({"language": "de"}));
@@ -465,6 +518,7 @@ fn help_check_result_follows_the_selected_language() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn help_check_explains_when_checks_are_unavailable() {
     let mut h = crate::scenario::Harness::new();
     h.app.updater.off = true;
@@ -475,6 +529,7 @@ fn help_check_explains_when_checks_are_unavailable() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn closing_a_manual_check_does_not_reopen_it_when_an_update_arrives() {
     let (mut h, tx) = pending_check();
     h.call("ui.help", json!({"item": "updates"}));
@@ -489,6 +544,7 @@ fn closing_a_manual_check_does_not_reopen_it_when_an_update_arrives() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn help_check_keeps_an_active_installation_on_screen() {
     let (mut h, dir) = open_update_window(None);
     let (_tx, rx) = std::sync::mpsc::channel();
@@ -502,6 +558,7 @@ fn help_check_keeps_an_active_installation_on_screen() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn the_title_bar_offers_the_new_version_and_opens_the_update_window() {
     let dir = scratch();
     let (feed, version) = next_release_feed(&dir.0);
@@ -537,6 +594,7 @@ fn the_title_bar_offers_the_new_version_and_opens_the_update_window() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn the_pill_shortens_in_a_narrow_title_bar() {
     let dir = scratch();
     let (feed, version) = next_release_feed(&dir.0);
@@ -740,6 +798,7 @@ fn unavailable_preferences_show_disabled_update_controls_and_real_values() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn general_updates_show_real_status_and_time_and_check_now_uses_the_existing_feed() {
     let dir = scratch();
     let (feed, version) = next_release_feed(&dir.0);
@@ -871,6 +930,7 @@ fn the_record_matches_folders_bundles_and_windows_paths() {
 
 /// A harness with a newer release found and the Update window open, on an AppImage that a
 /// launcher may manage. The host can download, so the one-click update is on offer unless managed.
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn open_update_window(managed: Option<&str>) -> (crate::scenario::Harness, Scratch) {
     let dir = scratch();
     let (feed, _) = next_release_feed(&dir.0);
@@ -891,6 +951,7 @@ fn open_update_window(managed: Option<&str>) -> (crate::scenario::Harness, Scrat
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn a_managed_install_points_to_its_manager_instead_of_updating_itself() {
     let (mut h, _dir) = open_update_window(Some("ArtCraft Launcher"));
     assert_eq!(install_method(&mut h.app), None, "no AppImage self-replace");
@@ -905,6 +966,7 @@ fn a_managed_install_points_to_its_manager_instead_of_updating_itself() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn an_unmanaged_install_updates_itself_as_before() {
     let (mut h, _dir) = open_update_window(None);
     assert_eq!(install_method(&mut h.app), Some(install::Method::AppImage("/home/me/SolidCraft.AppImage".into())));
@@ -914,6 +976,7 @@ fn an_unmanaged_install_updates_itself_as_before() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn periodic_checks_refresh_the_offered_label() {
     let dir = scratch();
     let (feed, first) = next_release_feed(&dir.0);
@@ -936,6 +999,7 @@ fn periodic_checks_refresh_the_offered_label() {
 }
 
 #[test]
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 fn install_selection_refreshes_the_button_and_progress_before_completion() {
     let dir = scratch();
     let target = dir.0.join("SolidCraft.AppImage");

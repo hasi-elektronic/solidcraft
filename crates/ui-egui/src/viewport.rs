@@ -507,12 +507,20 @@ fn picture_far(app: &SolveApp, cam: &Camera) -> f64 {
 /// Sketches drawn in the viewport: the active one, and finished ones not yet used by a feature.
 pub(crate) fn visible_sketches(app: &SolveApp) -> Vec<u64> {
     let st = crate::open_meshing::shown_world(app);
-    st.sketches.iter().filter(|s| solidcraft_engine::view::sketch_shown(&app.session, s.feature)).map(|s| s.feature).collect()
+    st.sketches.iter().filter(|s| crate::documents::component_view_feature(app, s.feature))
+        .filter(|s| solidcraft_engine::view::sketch_shown(&app.session, s.feature)).map(|s| s.feature).collect()
 }
 
 /// What Home, Fit and the orbit pivot frame: the bodies and sketches shown now, where they are
 /// now (see [`solidcraft_engine::view::bounds`]).
 pub fn view_bounds(app: &SolveApp) -> solidcraft_engine::geom::Aabb3 {
+    if crate::documents::component_view_active(app) {
+        let st = crate::open_meshing::shown_world(app);
+        return body_bounds(app, &st)
+            .iter()
+            .filter(|(name, _)| app.body_visible(name))
+            .fold(solidcraft_engine::geom::Aabb3::EMPTY, |bounds, (_, body)| bounds.union(body));
+    }
     // Bodies still being meshed after an open frame the view by their outlines.
     if crate::open_meshing::framing(app) {
         return solidcraft_engine::view::unmeshed_bounds(&app.session);
@@ -529,7 +537,7 @@ pub(crate) fn in_view_centre(app: &SolveApp, proj: &Proj) -> Option<Vec3> {
     let st = crate::open_meshing::shown_world(app);
     let b = body_bounds(app, &st)
         .iter()
-        .filter(|(name, b)| !b.is_empty() && app.session.body_visible(name) && in_view(proj, b))
+        .filter(|(name, b)| !b.is_empty() && app.body_visible(name) && in_view(proj, b))
         .fold(solidcraft_engine::geom::Aabb3::EMPTY, |a, (_, b)| a.union(b));
     (!b.is_empty()).then(|| b.center())
 }
@@ -2167,7 +2175,13 @@ type BodyBounds = (std::sync::Arc<solidcraft_engine::doc::ModelState>, std::sync
 /// The model's extent: bodies (from the cached boxes) and sketches.
 pub fn model_bounds(app: &SolveApp) -> solidcraft_engine::geom::Aabb3 {
     let st = crate::open_meshing::shown_world(app);
-    let bodies = body_bounds(app, &st).iter().fold(solidcraft_engine::geom::Aabb3::EMPTY, |a, (_, x)| a.union(x));
+    let bodies = body_bounds(app, &st)
+        .iter()
+        .filter(|(name, _)| !crate::documents::component_view_active(app) || app.body_visible(name))
+        .fold(solidcraft_engine::geom::Aabb3::EMPTY, |a, (_, x)| a.union(x));
+    if crate::documents::component_view_active(app) && app.session.active_sketch.is_none() {
+        return bodies;
+    }
     let mut b = bodies.union(&sketch_bounds(app, &st));
     for c in solidcraft_engine::view::shown_point_clouds(&app.session) {
         for p in c.world_corners().into_iter().flatten() {
@@ -2432,7 +2446,11 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
         }
         Some(moved)
     };
-    let sketches = if through { st.sketches.iter().map(|s| s.feature).collect() } else { visible_sketches(app) };
+    let sketches = if through && !crate::documents::component_view_active(app) {
+        st.sketches.iter().map(|s| s.feature).collect()
+    } else {
+        visible_sketches(app)
+    };
     let mut hits = Vec::new();
     let (o, d) = proj.ray(pos);
     // MID is an idle sketch selection target. Tools and dialogs keep their existing picks.
@@ -2575,7 +2593,7 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
     // Bounds retain the state's body order. Looking each one up by name made both passes
     // quadratic for assemblies with many small parts.
     for (i, b) in st.bodies.iter().enumerate() {
-        if !through && !app.body_visible(&b.name) {
+        if (!through || crate::documents::component_view_active(app)) && !app.body_visible(&b.name) {
             continue;
         }
         // Bodies whose box the ray misses (or enters behind the best hit so far) are skipped.
@@ -2643,7 +2661,7 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
     let mut bestv = Near::new(all);
     let mut beste = Near::new(all);
     for (i, b) in st.bodies.iter().enumerate() {
-        if !through && !app.body_visible(&b.name) {
+        if (!through || crate::documents::component_view_active(app)) && !app.body_visible(&b.name) {
             continue;
         }
         let mut body_slack = slack;

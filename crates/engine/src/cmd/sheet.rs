@@ -39,7 +39,7 @@ pub static COMMANDS: &[CommandSpec] = &[
          position?: inside|outside|middle|material_outside|tangent (where the bend starts: the outer virtual sharp on the edge (default), \
          the bend starting at the edge (bend_outside is the same), half way, the inner virtual sharp on the edge, \
          or the bend's outer face tangent to the edge's face (below 90 deg the bend's end on that face)), flip?, body?, corner_relief_shape?: notch|round|rectangular|tear and corner_relief? (size across): \
-         the relief at the corners these flanges make (default: the rule's); \
+         the relief at the corners these flanges make (default: the rule's), corner_gap? (minimum 0.01 mm, default: the rule); \
          then?: [{angle?, height, flip?}] further bends (at most 16), each a flange on the far edge of the one before, flip: true turns that bend the other way (edge only); \
          type?: base|edge|contour (default from the inputs); name?, body_name? (the new body). \
          Thickness, K-factor and bend radius come from the rule (sheet.manage_rules); passing them here is refused, \
@@ -287,6 +287,9 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
         None if p.get("curves").is_some() => "contour".into(),
         None => "base".into(),
     };
+    if nested.and_then(|base| base.get("corner_gap")).is_some_and(|v| !v.is_null()) {
+        return Err(bad(cmd, "`corner_gap` must be a top-level edge-flange parameter"));
+    }
     let refused = |k: &&&str| !(ty == "edge" && EDGE_RELIEF.contains(*k));
     if let Some(key) = RULE_ONLY.iter().filter(refused).find(|k| p.get(**k).is_some() || nested.is_some_and(|b| b.get(**k).is_some())) {
         return Err(bad(
@@ -296,6 +299,9 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
                  sheet.manage_rules {{name, {key}, …}} and pass its name as `rule`"
             ),
         ));
+    }
+    if ty != "edge" && p.get("corner_gap").is_some_and(|v| !v.is_null()) {
+        return Err(bad(cmd, "`corner_gap` is only for edge flanges"));
     }
     if ty != "edge" && p.get("then").is_some_and(|v| !v.is_null()) {
         return Err(bad(cmd, "`then` (further bends) is only for edge flanges"));
@@ -369,6 +375,18 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(c) = &corner_relief {
                 check_expr(s, c, Kind::Length, cmd, "corner_relief")?;
             }
+            let corner_gap = if p.get("corner_gap").is_some_and(|value| !value.is_null()) {
+                Some(expr(p, "corner_gap").ok_or_else(|| bad(cmd, "`corner_gap` must be a non-empty length expression"))?)
+            } else {
+                None
+            };
+            if let Some(gap) = &corner_gap {
+                check_expr(s, gap, Kind::Length, cmd, "corner_gap")?;
+                let value = s.doc.eval(&s.doc.with_design_unit(gap, Kind::Length), Kind::Length).map_err(|e| bad(cmd, e.to_string()))?;
+                if !value.is_finite() || value < 0.01 {
+                    return Err(bad(cmd, "the flange gap must be at least 0.01 mm"));
+                }
+            }
             let flip = bool_(p, "flip").unwrap_or(false);
             let mut made = add_feature(
                 s,
@@ -383,6 +401,7 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
                     body: body.clone().map(BodyName),
                     corner_relief_shape,
                     corner_relief,
+                    corner_gap,
                     height_from: height_from.clone(),
                 },
             )?;
@@ -403,6 +422,7 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
                         body: body.clone().map(BodyName),
                         corner_relief_shape: None,
                         corner_relief: None,
+                        corner_gap: None,
                         height_from: height_from.clone(),
                     },
                 )?;
@@ -628,6 +648,9 @@ fn rules(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sheet.manage_rules";
     let name = str_(p, "name").map(str::trim).filter(|n| !n.is_empty() && n.len() <= 128).ok_or_else(|| bad(cmd, "`name` is required"))?.to_string();
     if bool_(p, "delete").unwrap_or(false) {
+        if crate::product::PRODUCT.branded && s.doc.sheet.rules.iter().any(|r| r.name == name) && s.doc.sheet.rules.iter().all(|r| r.name == name) {
+            return Err(bad(cmd, "the last sheet rule cannot be deleted; edit it or add another rule first"));
+        }
         let doc = s.doc_mut();
         let before = doc.sheet.rules.len();
         doc.sheet.rules.retain(|r| r.name != name);

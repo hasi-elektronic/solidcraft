@@ -1,0 +1,26 @@
+{
+  "ar": {
+    "ui.part_view_missing": "لم يعد الجزء متاحاً. ارجع إلى التجميع."
+  },
+  "de": {
+    "ui.part_view_missing": "Das Teil ist nicht mehr verfügbar. Kehren Sie zur Baugruppe zurück."
+  },
+  "en": {
+    "ui.part_view_missing": "The part is no longer available. Return to the assembly."
+  },
+  "he": {
+    "ui.part_view_missing": "החלק אינו זמין עוד. יש לחזור למכלול."
+  },
+  "ja": {
+    "ui.part_view_missing": "部品は使用できなくなりました。アセンブリに戻ってください。"
+  },
+  "ko": {
+    "ui.part_view_missing": "부품을 더 이상 사용할 수 없습니다. 조립품으로 돌아가세요."
+  },
+  "vi": {
+    "ui.part_view_missing": "Chi tiết không còn khả dụng. Hãy quay lại cụm lắp ráp."
+  },
+  "zh": {
+    "ui.part_view_missing": "该零件已不可用。请返回装配体。"
+  }
+}

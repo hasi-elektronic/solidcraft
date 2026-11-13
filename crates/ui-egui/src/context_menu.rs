@@ -662,6 +662,9 @@ fn viewport_items(app: &SolveApp) -> Vec<Item> {
         v.extend(sketch_items(app, sketch));
     } else if has(|s| matches!(s, Sel::Face { .. })) {
         let face = sel.iter().find_map(|s| if let Sel::Face { body, .. } = s { Some(body.clone()) } else { None }).unwrap_or_default();
+        if let Some(item) = open_part_item(app, &face) {
+            v.push(item);
+        }
         let (feature, sketch) = feature_and_sketch(app, picked_face_feature(app));
         let hidden = app.session.visibility.hidden_bodies.contains(&face);
         if app.preferences.nav == "solidworks" {
@@ -796,6 +799,9 @@ fn body_items(app: &SolveApp, bodies: &[String], browser: bool) -> Vec<Item> {
     ];
     if one {
         let b = bodies.first().cloned().unwrap_or_default();
+        if let Some(item) = open_part_item(app, &b) {
+            v.insert(0, item);
+        }
         if let Some(component) = crate::dialogs_part_size::component_for_bodies(app, bodies) {
             v.push(cmd(app, "parts.resize", "Change Part Size").with(json!({"component":component})));
         }
@@ -806,6 +812,51 @@ fn body_items(app: &SolveApp, bodies: &[String], browser: bool) -> Vec<Item> {
         v.push(act("ui.findTimeline", "Find in Timeline", "rollback").with(json!({ "body": b })));
     }
     v
+}
+
+/// Open the component owning this body at the placement that was actually selected.
+fn open_part_item(app: &SolveApp, body: &str) -> Option<Item> {
+    let component = app.session.world_state().body(body)?.component;
+    if component == 0 {
+        return None;
+    }
+    let path = app
+        .session
+        .doc
+        .placements()
+        .into_iter()
+        .filter(|(id, _, _)| *id == component)
+        .map(|(_, path, _)| path)
+        .find(|path| app.session.occurrence_bodies(path, true).is_ok_and(|bodies| bodies.iter().any(|name| name == body)))?;
+    Some(act("ui.openPart", "ui.open_part_tab", "open").with(json!({"component": component, "path": path, "body": body})))
+}
+
+/// The part command for a component placement: a single body opens directly; several bodies
+/// are listed separately, so selecting a body never opens its siblings as one combined part.
+fn open_part_for_path(app: &SolveApp, path: &[u64]) -> Option<Item> {
+    app.session.occurrence_placement(path).ok()?;
+    let mut entries = Vec::new();
+    // Look up each placement once instead of rescanning every placement for each body. The
+    // direct-body lookup keeps the correct owner and placement for nested/repeated parts.
+    for (component, own_path, _) in app.session.doc.placements().into_iter().filter(|(_, own_path, _)| own_path.starts_with(path)) {
+        let Ok(names) = app.session.occurrence_bodies_shared(&own_path, false) else { continue };
+        for body in names.iter() {
+            entries.push(act("ui.openPart", body, "open").with(json!({"component": component, "path": &own_path, "body": body})));
+        }
+    }
+    match entries.len() {
+        0 => None,
+        1 => {
+            let mut item = entries.pop()?;
+            item.label = "ui.open_part_tab".into();
+            Some(item)
+        }
+        _ => {
+            let mut menu = act("ui.openPartChoices", "ui.open_part_tab", "open");
+            menu.children = entries;
+            Some(menu)
+        }
+    }
 }
 
 fn sketch_items(app: &SolveApp, id: u64) -> Vec<Item> {
@@ -922,6 +973,12 @@ fn joint_items(app: &SolveApp, id: u64) -> Vec<Item> {
 fn occurrence_items(app: &SolveApp, path: &[u64]) -> Vec<Item> {
     let Ok(placement) = app.session.occurrence_placement(path) else { return Vec::new() };
     let mut entries = component_items(app, placement.component);
+    // A component menu initially uses its first occurrence. Replace its open command with
+    // body-specific choices for the occurrence actually right-clicked.
+    entries.retain(|item| item.id != "ui.openPart" && item.id != "ui.openPartChoices");
+    if let Some(open) = open_part_for_path(app, path) {
+        entries.insert(0, open);
+    }
     if app.session.occurrence_scope_count(path).is_ok_and(|n| n > 1) {
         entries.insert(0, Item::heading("Shared child: edits affect all copies of its parent"));
     }
@@ -1009,6 +1066,9 @@ fn component_items(app: &SolveApp, id: u64) -> Vec<Item> {
     if id != 0 {
         let grounded = occ.is_some_and(|o| o.grounded);
         let oid = occ.map(|o| o.id).unwrap_or(0);
+        if let Some(open) = open_part_for_path(app, &doc.first_path(id)) {
+            v.push(open);
+        }
         v.push(act("ui.activate", "Activate", "component").with(json!({ "component": id })).on(!active));
         if doc.links.contains_key(&id) {
             v.push(act("ui.editInPlace", "Edit in Place", "edit").with(json!({ "component": id })));
@@ -1459,6 +1519,16 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.extractComponent" => {
             if let Some(component) = id_of(&p, "component") {
                 crate::linked_source::extract(app, component);
+            }
+        }
+        "ui.openPart" => {
+            if let Some(component) = id_of(&p, "component") {
+                let path = p.get("path").and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_u64).collect());
+                if let Some(body) = p.get("body").and_then(Value::as_str) {
+                    crate::linked_source::open_body(app, component, path, body.to_string());
+                } else {
+                    crate::linked_source::open_part(app, component, path);
+                }
             }
         }
         "ui.copy" => drop(crate::edit_clipboard::copy(app)),

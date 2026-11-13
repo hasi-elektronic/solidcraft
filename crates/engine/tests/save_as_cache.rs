@@ -71,3 +71,31 @@ fn naming_a_design_does_not_warm_cold_or_revalidate_stale_placements() {
     let bytes = save(&mut edited, "edited");
     assert!(solidcraft_io::read_design_geometry(&bytes).is_none(), "bodies of another document must not be saved as this one's");
 }
+
+#[cfg(any(feature = "brand-hasisolid", feature = "brand-mssolid"))]
+#[test]
+fn branded_sheet_rules_preserve_legacy_files_and_roundtrip() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/legacy-027-sheet");
+    for (name, thickness) in [("implicit-027.sc", "2.5 mm"), ("custom-027.sc", "4 mm")] {
+        let mut session = Session::default();
+        session.execute("doc.open", &json!({"path":fixtures.join(name)})).unwrap();
+        assert_eq!(session.doc.sheet_rule(None).thickness, thickness, "{name}");
+        assert_eq!(session.world_state().bodies.len(), 1, "{name}");
+    }
+    let path = std::env::temp_dir().join(format!("hasisolid-sheet-roundtrip-{}.sc", std::process::id()));
+    assert!(!path.exists(), "test target already exists");
+    let mut session = Session::default();
+    assert_eq!(session.doc.sheet_rule(None).thickness, "2 mm");
+    assert!(session.execute("sheet.manage_rules", &json!({"name":"Steel (mm)","delete":true})).is_err());
+    assert_eq!(session.doc.sheet_rule(None).thickness, "2 mm", "deleting the last rule must not silently restore 2.5 mm");
+    session.execute("sheet.manage_rules", &json!({"name":"Steel (mm)","thickness":"3 mm","active":true})).unwrap();
+    session.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(session.doc.sheet_rule(None).thickness, "2 mm");
+    session.execute("file.save_as", &json!({"path":path})).unwrap();
+    let mut reopened = Session::default();
+    reopened.execute("doc.open", &json!({"path":path})).unwrap();
+    assert_eq!(reopened.doc.sheet_rule(None).thickness, "2 mm");
+    drop(reopened);
+    drop(session);
+    std::fs::remove_file(path).unwrap();
+}

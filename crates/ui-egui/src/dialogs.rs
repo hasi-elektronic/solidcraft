@@ -576,6 +576,7 @@ fn adopt_dialog(app: &mut SolveApp, prepared: solidcraft_engine::ComputedCommand
     if app.file_load.busy() || app.file_picker_busy() {
         return Err("a file operation is in progress".into());
     }
+    crate::documents::sync_component_view_scope(app);
     let replies = app.session.accept_commands(prepared).map_err(|e| e.to_string())?;
     app.big_operation = true;
     for (id, reply) in replies {
@@ -585,6 +586,7 @@ fn adopt_dialog(app: &mut SolveApp, prepared: solidcraft_engine::ComputedCommand
             app.set_status(why, false);
         }
     }
+    crate::documents::sync_component_view_scope(app);
     Ok(())
 }
 
@@ -1731,6 +1733,13 @@ impl Dialog {
                     }
                 }
             }
+        }
+        if self.active == 1
+            && let Kind::Sheet(crate::dialogs_sheet::Sm::Convert { suggested_edges, .. }) = &mut self.kind
+        {
+            // A direct click turns this edge into a user decision, including when a prior
+            // suggestion is removed and then picked again.
+            suggested_edges.retain(|edge| !picked.iter().any(|pick| selection::same_item(edge, pick)));
         }
         inp.toggle(picked);
         self.focus = true;
@@ -3784,7 +3793,15 @@ pub(crate) fn roll_marker(app: &mut SolveApp, marker: Option<usize>) -> Result<(
     let undo = std::mem::take(&mut app.session.undo);
     let redo = std::mem::take(&mut app.session.redo);
     let selection = std::mem::take(&mut app.session.selection);
-    let result = app.run("timeline.roll_to", marker.map(|m| json!({"position":m})).unwrap_or_else(|| json!({})));
+    let params = marker.map(|m| json!({"position":m})).unwrap_or_else(|| json!({}));
+    // A feature editor's temporary rollback is restored or checked against the complete
+    // assembly before its result can be accepted. Keep the part boundary while rolling back.
+    let result = if crate::documents::component_view_has_body(app) {
+        let result = app.session.execute_part_editor_marker(&params).map_err(|e| e.to_string());
+        app.command_completed("timeline.roll_to", result)
+    } else {
+        app.run("timeline.roll_to", params)
+    };
     app.session.undo = undo;
     app.session.redo = redo;
     app.session.selection = selection;

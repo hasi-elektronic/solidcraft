@@ -583,7 +583,19 @@ pub(super) fn sheet_eval(
             st.sheets.push(sh);
             Ok(())
         }
-        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from } => {
+        FeatureKind::SheetFlange {
+            edges,
+            height,
+            angle,
+            radius,
+            position,
+            flip,
+            body,
+            corner_relief_shape,
+            corner_relief,
+            height_from,
+            corner_gap,
+        } => {
             let i = sheet_for(st, body, edges.first().map(|e| e.point.0))?;
             let (h, a) = (val(vals, height, Kind::Length)?, val(vals, angle, Kind::Angle)?);
             // Each edge's own height and angle, else the feature's.
@@ -635,8 +647,22 @@ pub(super) fn sheet_eval(
                 .zip(own)
                 .map(|(pick, (height, angle))| sheet::EdgeFlange { pick, height, angle, from })
                 .collect();
+            let gap = match corner_gap {
+                Some(expr) => {
+                    let gap = val(vals, expr, Kind::Length)?;
+                    if !gap.is_finite() || gap < 0.01 {
+                        return Err(DocError::Invalid("the flange gap must be at least 0.01 mm".into()));
+                    }
+                    Some(gap)
+                }
+                None => None,
+            };
             let n0 = sh.flanges.len();
-            let (_, notes) = sh.add_flanges_each(&each, rr, position, *flip, relief)?;
+            // An override is atomic and local to this feature; without one the rule applies.
+            let (_, notes) = match gap {
+                Some(gap) => sh.add_flanges_each_with_gap(&each, rr, position, *flip, relief, gap)?,
+                None => sh.add_flanges_each(&each, rr, position, *flip, relief)?,
+            };
             if !notes.is_empty() {
                 let notes = notes.join("; ");
                 *warning = Some(match warning.take() {

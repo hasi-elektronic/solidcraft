@@ -27,7 +27,13 @@ pub fn default_dir() -> Option<PathBuf> {
     if cfg!(test) {
         return Some(solidcraft_io::vfs::temp_dir().join(format!("solidcraft-test-recovery-{}", std::process::id())));
     }
-    if let Some(d) = solidcraft_geom::env::var_os("RECOVERY_DIR").filter(|d| !d.is_empty()) {
+    let override_dir = if crate::product::PRODUCT.branded {
+        let key = format!("{}_RECOVERY_DIR", crate::product::PRODUCT.name.to_ascii_uppercase());
+        std::env::var_os(key)
+    } else {
+        solidcraft_geom::env::var_os("RECOVERY_DIR")
+    };
+    if let Some(d) = override_dir.filter(|d| !d.is_empty()) {
         return Some(long_names(Path::new(&d)));
     }
     let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
@@ -42,7 +48,7 @@ pub fn default_dir() -> Option<PathBuf> {
     // Compatibility shim (docs/compatibility.md): autosaves made before the rename (or, in the
     // Flatpak sandbox, under an earlier app id) are copied to the new folder on first launch; the
     // old folder is left as it was.
-    for old in solidcraft_io::legacy_flatpak_paths(&dir).into_iter().chain([legacy]) {
+    for old in solidcraft_io::legacy_flatpak_paths(&dir).into_iter().chain([legacy]).filter(|_| !crate::product::PRODUCT.branded) {
         if let Err(e) = solidcraft_io::adopt_legacy_dir(&dir, &old) {
             log::warn!("recovery: could not copy {} to {}: {e}", old.display(), dir.display());
         }
@@ -57,18 +63,19 @@ pub fn default_dir() -> Option<PathBuf> {
 pub fn data_dir() -> Option<PathBuf> {
     let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
     if cfg!(windows) {
-        Some(env("LOCALAPPDATA")?.join("SolidCraft"))
+        Some(env("LOCALAPPDATA")?.join(crate::product::PRODUCT.data_folder))
     } else if cfg!(target_os = "macos") {
-        Some(env("HOME")?.join("Library/Application Support/SolidCraft"))
+        Some(env("HOME")?.join("Library/Application Support").join(crate::product::PRODUCT.data_folder))
     } else {
-        Some(env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?.join("solidcraft"))
+        Some(env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?.join(crate::product::PRODUCT.xdg_folder))
     }
 }
 
 /// The recovery folder under the per-user data `root`, and the folder earlier releases used.
 /// Windows and macOS name the app's folder in title case, other systems in lower case.
 fn dirs_under(root: &Path, title_case: bool) -> (PathBuf, PathBuf) {
-    let (name, legacy) = if title_case { ("SolidCraft", "SolveCraft") } else { ("solidcraft", "solvecraft") };
+    let name = if title_case { crate::product::PRODUCT.data_folder } else { crate::product::PRODUCT.xdg_folder };
+    let legacy = if title_case { "SolveCraft" } else { "solvecraft" };
     (root.join(name).join("recovery"), root.join(legacy).join("recovery"))
 }
 
@@ -452,9 +459,11 @@ mod tests {
     #[test]
     fn recovery_dirs_and_their_legacy_names() {
         let (dir, legacy) = super::dirs_under(Path::new("/data"), false);
-        assert_eq!((dir.as_path(), legacy.as_path()), (Path::new("/data/solidcraft/recovery"), Path::new("/data/solvecraft/recovery")));
+        assert_eq!(dir, Path::new("/data").join(crate::product::PRODUCT.xdg_folder).join("recovery"));
+        assert_eq!(legacy, Path::new("/data/solvecraft/recovery"));
         let (dir, legacy) = super::dirs_under(Path::new("/data"), true);
-        assert_eq!((dir.as_path(), legacy.as_path()), (Path::new("/data/SolidCraft/recovery"), Path::new("/data/SolveCraft/recovery")));
+        assert_eq!(dir, Path::new("/data").join(crate::product::PRODUCT.data_folder).join("recovery"));
+        assert_eq!(legacy, Path::new("/data/SolveCraft/recovery"));
     }
 
     use super::*;

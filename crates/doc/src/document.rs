@@ -1202,6 +1202,10 @@ pub enum FeatureKind {
         /// virtual sharp (`sheet::HeightFrom`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height_from: Option<String>,
+        /// Gap between this feature's meeting flanges; absent follows the sheet rule.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Flange gap")]
+        corner_gap: Option<Expr>,
     },
     /// Flat hems on sheet edges.
     SheetHem {

@@ -1,0 +1,26 @@
+{
+  "ar": {
+    "ui.part_view_link_scope": "تُحفظ التغييرات في هذا التجميع؛ ويبقى الملف المصدر المرتبط دون تغيير."
+  },
+  "de": {
+    "ui.part_view_link_scope": "Änderungen werden in dieser Baugruppe gespeichert; die verknüpfte Quelldatei bleibt unverändert."
+  },
+  "en": {
+    "ui.part_view_link_scope": "Changes are saved in this assembly; the linked source file remains unchanged."
+  },
+  "he": {
+    "ui.part_view_link_scope": "השינויים נשמרים במכלול זה; קובץ המקור המקושר נשאר ללא שינוי."
+  },
+  "ja": {
+    "ui.part_view_link_scope": "変更はこのアセンブリに保存され、リンク元ファイルは変更されません。"
+  },
+  "ko": {
+    "ui.part_view_link_scope": "변경 사항은 이 조립품에 저장되며 연결된 원본 파일은 변경되지 않습니다."
+  },
+  "vi": {
+    "ui.part_view_link_scope": "Các thay đổi được lưu trong cụm lắp ráp này; tệp nguồn liên kết không thay đổi."
+  },
+  "zh": {
+    "ui.part_view_link_scope": "更改将保存在此装配体中，链接的源文件保持不变。"
+  }
+}

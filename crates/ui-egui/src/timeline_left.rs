@@ -319,6 +319,10 @@ fn seam_handle(app: &mut SolveApp, ui: &mut egui::Ui, card: Rect, parent: egui::
 
 /// Width alone chooses icons, names, horizontal transport and the optional title.
 pub fn left_timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
+    if crate::documents::component_view_has_body(app) {
+        crate::timeline::body_view_history(app, ui, true);
+        return;
+    }
     let t = Tokens::get();
     let names = names_fit(ui.available_width());
     timeline_transport(app, ui, names);
@@ -795,6 +799,10 @@ fn selection_actions(app: &mut SolveApp, ui: &mut egui::Ui, groups: &[solidcraft
 pub fn delete_selected_folders(app: &mut SolveApp) -> bool {
     if app.tree.picked_timeline_groups.is_empty() {
         return false;
+    }
+    if crate::documents::component_view_has_body(app) {
+        app.set_status(crate::i18n::tr("ui.part_view_feature_in_assembly"), true);
+        return true;
     }
     let groups = app.tree.picked_timeline_groups.clone();
     if app.run("timeline.ungroup", json!({"groups": groups})).is_ok() {

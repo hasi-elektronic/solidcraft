@@ -111,8 +111,8 @@ pub(crate) fn fields<'a>(doc: &Document, kind: &'a mut crate::dialogs::Kind) -> 
             _ => vec![],
         },
         D::Sheet(k) => match k {
-            Sm::Flange { height, radius, distance, relief_size, own, .. } => {
-                let mut values = vec![height, radius, distance, relief_size];
+            Sm::Flange { height, radius, distance, relief_size, corner_gap, own, .. } => {
+                let mut values = vec![height, radius, distance, relief_size, corner_gap];
                 values.extend(own.iter_mut().map(|(_, _, height)| height));
                 values
             }

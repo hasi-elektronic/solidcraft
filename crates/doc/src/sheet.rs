@@ -20,7 +20,7 @@ use crate::{DocError, Document, IDENTITY, Mat, Result, apply_point, apply_vector
 mod convert;
 #[path = "sheet_face_names.rs"]
 mod face_names;
-pub use convert::{bend_edge_names, convert_body};
+pub use convert::{bend_edge_names, convert_body, infer_bend_profile, suggest_bend_edges};
 pub(crate) use convert::{outline_loop, round_wall};
 pub use face_names::body_sheet_face_names;
 
@@ -2913,6 +2913,45 @@ impl SheetBody {
         flip: bool,
         relief: ReliefOverride,
     ) -> Result<(Vec<usize>, Vec<String>)> {
+        self.add_flanges_each_impl(edges, radius, position, flip, relief, false)
+    }
+
+    /// Apply a feature-local gap only to adjacent base flanges made together. An override
+    /// that cannot be applied fails atomically; later features keep the sheet's rule gap.
+    pub(crate) fn add_flanges_each_with_gap(
+        &mut self,
+        edges: &[EdgeFlange],
+        radius: f64,
+        position: &str,
+        flip: bool,
+        relief: ReliefOverride,
+        gap: f64,
+    ) -> Result<(Vec<usize>, Vec<String>)> {
+        // A previous feature can own a neighbouring corner. Its geometry is not rebuilt by
+        // this operation, so do not accept an override that might silently miss that corner.
+        if !self.flanges.is_empty() {
+            return Err(DocError::Invalid(
+                "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex".into(),
+            ));
+        }
+        let mut candidate = self.clone();
+        let original_gap = candidate.gap;
+        candidate.gap = gap;
+        let result = candidate.add_flanges_each_impl(edges, radius, position, flip, relief, true)?;
+        candidate.gap = original_gap;
+        *self = candidate;
+        Ok(result)
+    }
+
+    fn add_flanges_each_impl(
+        &mut self,
+        edges: &[EdgeFlange],
+        radius: f64,
+        position: &str,
+        flip: bool,
+        relief: ReliefOverride,
+        require_corner: bool,
+    ) -> Result<(Vec<usize>, Vec<String>)> {
         if edges.is_empty() || edges.len() > 1000 {
             return Err(DocError::Invalid("pick 1…1000 edges".into()));
         }
@@ -3103,6 +3142,22 @@ impl SheetBody {
             });
             made.push(self.flanges.len() - 1);
         }
+        if require_corner {
+            let corners = self.corners(&made);
+            let every_edge_is_paired = made.iter().all(|i| corners.iter().any(|k| k.a == *i || k.b == *i));
+            let all_close = corners.iter().all(|k| {
+                let (Some(a), Some(b)) = (self.flanges.get(k.a), self.flanges.get(k.b)) else { return false };
+                let ea = if k.a_end { a.d * -1.0 } else { a.d };
+                let eb = if k.b_end { b.d * -1.0 } else { b.d };
+                ea.dot(b.n) < -1e-9 && eb.dot(a.n) < -1e-9 && a.leg > 1e-9 && b.leg > 1e-9
+            });
+            if corners.is_empty() || !every_edge_is_paired || !all_close {
+                return Err(DocError::Invalid(
+                    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex"
+                        .into(),
+                ));
+            }
+        }
         let mut notes = Vec::new();
         for (&i, &free) in made.iter().zip(&freed) {
             notes.extend(self.relieve_bend_ends(i, free));
@@ -3110,6 +3165,9 @@ impl SheetBody {
         notes.extend(self.close_corners(&made, relief));
         notes.extend(self.close_return_corners(&made));
         notes.extend(self.close_side_corners(&made, relief));
+        if require_corner && notes.iter().any(|note| note.contains("left open")) {
+            return Err(DocError::Invalid("the flange gap could not be applied to every selected corner".into()));
+        }
         Ok((made, notes))
     }
 
@@ -6215,6 +6273,46 @@ mod tests {
     fn parallel_gap(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3) -> Option<f64> {
         let (u, v) = ((a1 - a0).normalized()?, (b1 - b0).normalized()?);
         (u.cross(v).len() < 1e-9).then(|| (b0 - a0).cross(u).len())
+    }
+
+    #[test]
+    fn explicit_gap_refuses_concave_and_mixed_selections_without_mutation() {
+        let pts = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 0.0),
+            Vec2::new(100.0, 40.0),
+            Vec2::new(40.0, 40.0),
+            Vec2::new(40.0, 100.0),
+            Vec2::new(0.0, 100.0),
+        ];
+        let region = Region2 { outer: Loop2::polygon(&pts).ccw(), holes: vec![] };
+        let mut sheet = base_flange("Body1", "AL2", &alu(), Plane::XY, region);
+        let before = sheet.clone();
+        let edges = [Vec3::new(70.0, 40.0, 2.0), Vec3::new(40.0, 70.0, 2.0)].map(|pick| EdgeFlange {
+            pick,
+            height: 20.0,
+            angle: std::f64::consts::FRAC_PI_2,
+            from: HeightFrom::Outer,
+        });
+        assert!(sheet.add_flanges_each_with_gap(&edges, 1.0, "inside", false, ReliefOverride::default(), 1.0).is_err());
+        assert_eq!(sheet, before, "a refused override must not mutate the sheet");
+        let mut sheet = base_flange(
+            "Body1",
+            "AL2",
+            &alu(),
+            Plane::XY,
+            rect(Vec2::new(0.0, 0.0), Vec2::new(120.0, 0.0), Vec2::new(120.0, 90.0), Vec2::new(0.0, 90.0)),
+        );
+        sheet.add_flange(Vec3::new(60.0, 0.0, 2.0), 20.0, std::f64::consts::FRAC_PI_2, 1.0, "inside", false).unwrap();
+        let before = sheet.clone();
+        let mixed = [Vec3::new(120.0, 45.0, 2.0), Vec3::new(60.0, 90.0, 2.0), Vec3::new(0.0, 45.0, 2.0)].map(|pick| EdgeFlange {
+            pick,
+            height: 20.0,
+            angle: std::f64::consts::FRAC_PI_2,
+            from: HeightFrom::Outer,
+        });
+        assert!(sheet.add_flanges_each_with_gap(&mixed, 1.0, "inside", false, ReliefOverride::default(), 1.0).is_err());
+        assert_eq!(sheet, before, "an existing feature must not be modified on refusal");
     }
 
     #[test]

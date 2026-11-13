@@ -7,6 +7,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub use solidcraft_product as product;
+
 pub mod agent_setup;
 pub mod batch_params;
 pub mod batch_preflight;
@@ -494,6 +496,10 @@ pub struct Session {
     pub active_component: u64,
     /// The placement used when authoring shared component geometry.
     pub active_occurrence_path: Option<Vec<u64>>,
+    /// A transient single-part editing boundary. It is not stored in a design file.
+    part_edit_scope: Option<(u64, String)>,
+    /// Prevent re-entering the boundary while checking a command on a scratch session.
+    part_scope_probe: bool,
     /// Occurrence moves not captured yet (Capture Position keeps them, a recompute drops them).
     pub pending_moves: std::collections::BTreeMap<u64, solidcraft_doc::Mat>,
     world_cache: std::sync::Mutex<Option<WorldCache>>,
@@ -658,9 +664,22 @@ const MAX_UNDO: usize = 200;
 const MAX_CHECKPOINTS: usize = 16;
 const MAX_LOG: usize = 2000;
 
+/// Initialise only new branded designs with the shop's default sheet rule.
+/// Documents read from disk keep their own rules and legacy implicit defaults.
+pub(crate) fn new_design_document(name: &str) -> Document {
+    let mut doc = Document::new(name);
+    if product::PRODUCT.branded {
+        let mut rule = solidcraft_doc::sheet::SheetRule::steel();
+        rule.thickness = "2 mm".into();
+        doc.sheet.active = Some(rule.name.clone());
+        doc.sheet.rules.push(rule);
+    }
+    doc
+}
+
 impl Default for Session {
     fn default() -> Self {
-        Session::new(Document::new("Untitled"))
+        Session::new(new_design_document("Untitled"))
     }
 }
 
@@ -726,6 +745,8 @@ impl Session {
             live_links: None,
             active_component: 0,
             active_occurrence_path: None,
+            part_edit_scope: None,
+            part_scope_probe: false,
             pending_moves: Default::default(),
             world_cache: Default::default(),
             joints_settled: None,
@@ -1448,6 +1469,176 @@ impl Session {
         Ok(())
     }
 
+    /// Set a non-persistent editing boundary for one component body. An empty body name is an
+    /// unresolved boundary: mutating operations fail closed until the caller clears or resolves it.
+    pub fn set_part_edit_scope(&mut self, scope: Option<(u64, String)>) {
+        self.part_edit_scope = scope;
+    }
+
+    /// Temporarily roll the timeline while opening a feature editor. The caller must retain
+    /// the complete original session and use `compute_editor_commands` or `restore_editor`.
+    pub fn execute_part_editor_marker(&mut self, params: &Value) -> Result<Value> {
+        let previous = self.part_scope_probe;
+        self.part_scope_probe = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.execute("timeline.roll_to", params)));
+        self.part_scope_probe = previous;
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// A component view must not silently alter any body outside the chosen part. The probe
+    /// runs on a scratch session; its result never reaches the document, history or journal.
+    fn check_part_edit(&self, id: &str, params: &Value) -> Result<()> {
+        let Some((component, selected)) = &self.part_edit_scope else { return Ok(()) };
+        if selected.is_empty() || self.active_component != *component {
+            return Err(EngineError::Other("the selected part is no longer available; return to the assembly".into()));
+        }
+        // Sketch editing temporarily rolls the marker back past the body and its siblings.
+        // Keep the original full design as the baseline and compare each candidate with its
+        // complete, restored timeline, including before accepting Finish.
+        let sketch_entry = self.sketch_entry.as_ref().filter(|entry| {
+            entry.restore_marker.is_some() && self.active_sketch == Some(entry.sketch)
+        });
+        let mut baseline = self.scratch();
+        if let Some(entry) = sketch_entry {
+            baseline.doc = entry.doc.clone();
+            baseline.refresh();
+        }
+        let before = baseline.model.state();
+        if !before.bodies.iter().any(|b| b.name == *selected && baseline.doc.model_body_component(b) == *component) {
+            return Err(EngineError::Other("the selected part is no longer available; return to the assembly".into()));
+        }
+        let mut probe = self.scratch();
+        probe.part_scope_probe = true;
+        probe.undo.clone_from(&self.undo);
+        probe.redo.clone_from(&self.redo);
+        probe.sketch_entry.clone_from(&self.sketch_entry);
+        probe.execute(id, params)?;
+        let restore_marker = sketch_entry.and_then(|entry| entry.restore_marker)
+            .or_else(|| (id == "sketch.edit" && params.get("restore_marker").is_some()).then_some(self.doc.marker));
+        if let Some(marker) = restore_marker {
+            probe.doc_mut().marker = marker;
+            probe.refresh();
+        }
+        baseline.check_part_result(&probe)
+    }
+
+    /// Compare a completed transaction with the full, unrolled assembly state.
+    fn check_part_result(&self, probe: &Session) -> Result<()> {
+        let Some((component, selected)) = &self.part_edit_scope else { return Ok(()) };
+        let before = self.model.state();
+        if selected.is_empty() || !before.bodies.iter().any(|b| b.name == *selected && self.doc.model_body_component(b) == *component) {
+            return Err(EngineError::Other("the selected part is no longer available; return to the assembly".into()));
+        }
+        if self.doc.occurrences != probe.doc.occurrences || self.doc.components != probe.doc.components || self.pending_moves != probe.pending_moves
+            || self.doc.params != probe.doc.params || self.doc.text_params != probe.doc.text_params
+            || self.doc.configs != probe.doc.configs || self.doc.units != probe.doc.units
+            || self.doc.assembly != probe.doc.assembly || self.doc.sheet != probe.doc.sheet
+            || self.doc.plastic != probe.doc.plastic || self.doc.parts != probe.doc.parts
+            || self.doc.links != probe.doc.links || self.doc.user_materials != probe.doc.user_materials
+            || self.doc.materials != probe.doc.materials || self.doc.appearances != probe.doc.appearances
+            || self.doc.body_components != probe.doc.body_components || self.doc.body_offsets != probe.doc.body_offsets
+        {
+            return Err(EngineError::Other("this operation would change the assembly outside the selected part".into()));
+        }
+        let after = probe.model.state();
+        for body in &before.bodies {
+            let owner = self.doc.model_body_component(body);
+            if body.name == *selected && owner == *component {
+                continue;
+            }
+            let Some(other) = after.body(&body.name) else {
+                return Err(EngineError::Other("this operation would change another body; return to the assembly".into()));
+            };
+            if probe.doc.model_body_component(other) != owner
+                || (!body.body.same(&other.body) && !self.independent_terminal_box_unchanged(probe, body, other))
+            {
+                return Err(EngineError::Other("this operation would change another body; return to the assembly".into()));
+            }
+        }
+        // Explicit renames may also update feature references and thus cannot always be
+        // inferred from the document diff. The session records the exact document pair for
+        // rename and undo/redo; use that existing identity before falling back to inference.
+        let mut rename_probe = probe.scratch();
+        let rename = rename_probe.body_rename(&self.doc).map(|(old, new, _)| (old, new));
+        for body in &after.bodies {
+            if before.body(&body.name).is_none()
+                && !rename.as_ref().is_some_and(|(old, new)| old == selected && new == &body.name)
+            {
+                return Err(EngineError::Other("this operation would add another body; return to the assembly".into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// A cache miss can rebuild an unchanged last box with fresh topology pointers. For this
+    /// narrow case the identical, reference-free construction is a proof of equal geometry:
+    /// it makes a new body, reads no other feature, and no later feature can change it. Other
+    /// kinds remain fail-closed; in particular STEP export is not an equality test because it
+    /// can approximate curves and simplify topology.
+    fn independent_terminal_box_unchanged(&self, other: &Session, before: &solidcraft_doc::ModelBody, after: &solidcraft_doc::ModelBody) -> bool {
+        use solidcraft_doc::{FeatureKind, Operation};
+        if self.doc.marker != other.doc.marker || before.feature != after.feature || before.component != after.component
+            || before.transferred != after.transferred || before.source_name != after.source_name
+            || before.source_transform != after.source_transform || before.imported != after.imported
+            || before.body.color() != after.body.color() || before.body.paint() != after.body.paint()
+            || before.body.split_lines() != after.body.split_lines() || before.body.face_sources() != after.body.face_sources()
+        {
+            return false;
+        }
+        let Some(index) = self.doc.feature_index(before.feature) else { return false };
+        let active = self.doc.marker.unwrap_or(self.doc.features.len());
+        if index + 1 != active || other.doc.marker.unwrap_or(other.doc.features.len()) != active {
+            return false;
+        }
+        let feature = &self.doc.features[index];
+        if other.doc.features.get(index) != Some(feature) || feature.suppressed
+            || !matches!(&feature.kind, FeatureKind::Box { operation: Operation::NewBody, .. })
+        {
+            return false;
+        }
+        feature.kind.expressions().iter().all(|expr| solidcraft_doc::expr::references(expr).is_empty())
+    }
+
+    /// Give implicit booleans the selected body explicitly, so later edits/recomputes cannot
+    /// expand their scope to the other parts even if they become visible or intersect the tool.
+    fn part_edit_parameters(&self, id: &str, params: &Value) -> Result<Option<Value>> {
+        let Some((component, selected)) = &self.part_edit_scope else { return Ok(None) };
+        let primitive = matches!(id, "solid.box" | "solid.cylinder" | "solid.sphere" | "solid.torus" | "solid.cone");
+        let profile = matches!(id, "solid.extrude" | "solid.revolve");
+        if !(primitive || profile) || !params.get("operation").and_then(Value::as_str).is_some_and(|op| {
+            ["cut", "join", "intersect", "auto"].iter().any(|candidate| op.eq_ignore_ascii_case(candidate))
+        }) {
+            return Ok(None);
+        }
+        if selected.is_empty() || self.active_component != *component {
+            return Err(EngineError::Other("the selected part is no longer available; return to the assembly".into()));
+        }
+        let name = if profile {
+            self.active_occurrence_path.as_ref().and_then(|path| self.occurrence_placement(path).ok())
+                .and_then(|placement| placement.bodies.into_iter().find(|body| body.source == *selected).map(|body| body.world))
+                .unwrap_or_else(|| selected.clone())
+        } else {
+            selected.clone()
+        };
+        for key in ["participants", "targets"] {
+            if let Some(items) = params.get(key).and_then(Value::as_array)
+                && !items.is_empty()
+            {
+                if items.iter().any(|item| item.as_str() != Some(name.as_str())) {
+                    return Err(EngineError::Other("this operation targets another body; return to the assembly".into()));
+                }
+                return Ok(None);
+            }
+        }
+        let mut scoped = params.clone();
+        let Some(object) = scoped.as_object_mut() else { return Ok(None) };
+        object.insert(if profile { "targets" } else { "participants" }.into(), serde_json::json!([name]));
+        Ok(Some(scoped))
+    }
+
     /// Run a command with JSON parameters (no dialogs). Undoable commands record an undo step
     /// when they change the document; a failing or panicking command leaves it unchanged.
     ///
@@ -1459,6 +1650,7 @@ impl Session {
     /// the model up to date before anything reads it.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        let outer = !frames::in_command();
         let host_viewport = self.render_viewport.clone();
         let host_jobs = self.render_jobs.host.clone();
         let additional_jobs = self.render_jobs.additional.clone();
@@ -1470,6 +1662,25 @@ impl Session {
             }
         }
         (spec.enabled)(self).map_err(|why| EngineError::Disabled(spec.id.to_string(), why))?;
+        let scoped = if self.part_scope_probe || !outer { None } else { self.part_edit_parameters(id, params)? };
+        let params = scoped.as_ref().unwrap_or(params);
+        if self.part_edit_scope.is_some() && !self.part_scope_probe && outer {
+            if matches!(id, "sketch.finish" | "sketch.cancel") && params.get("restore_marker") == Some(&Value::Bool(false)) {
+                return Err(EngineError::Other("restore the assembly timeline before leaving the sketch".into()));
+            }
+            // A probe must never write an external file or cause an externally visible action.
+            if id == "component.extract" || (id.starts_with("file.") && spec.undoable)
+                || matches!(id, "file.new" | "doc.open" | "doc.recover" | "parameters.import" | "settings.profile.apply")
+                || (spec.undoable && (id.starts_with("parameters.") || id.starts_with("config.")
+                    || id.starts_with("material.") || id.starts_with("appearance.")
+                    || id.starts_with("joint.") || matches!(id, "document.units" | "sheet.manage_rules" | "plastic.manage_rules")))
+            {
+                return Err(EngineError::Other("return to the assembly before importing or extracting files".into()));
+            }
+            if spec.undoable || matches!(id, "edit.undo" | "edit.redo" | "sketch.edit" | "sketch.finish" | "sketch.cancel") {
+                self.check_part_edit(id, params)?;
+            }
+        }
         let before = Snapshot {
             label: spec.label.to_string(),
             doc: self.doc.clone(),
@@ -1477,6 +1688,7 @@ impl Session {
             pending_moves: self.pending_moves.clone(),
             visibility: self.visibility.clone(),
         };
+        let scope_previous_doc = self.part_edit_scope.as_ref().map(|_| before.doc.clone());
         // Where new geometry goes: not in the design, but a replay needs it (component.activate).
         let active_before = (self.active_component, self.active_occurrence_path.clone());
         let replacements = self.replacements;
@@ -1593,6 +1805,15 @@ impl Session {
                 Err(e)
             }
         };
+        if result.is_ok()
+            && let Some(previous) = scope_previous_doc
+            && !Arc::ptr_eq(&previous, &self.doc)
+            && let Some((old, new, _)) = self.body_rename(&previous)
+            && let Some((_, selected)) = self.part_edit_scope.as_mut()
+            && *selected == old
+        {
+            *selected = new;
+        }
         if let Some((before, changed, failed)) = crash_outcome {
             // Refresh and body-name pinning can copy the shared document. Remember the final
             // document, so the next command does not mistake that work for an outside edit
@@ -1707,7 +1928,7 @@ impl Session {
             undo: Vec::new(),
             redo: Vec::new(),
             active_sketch: self.active_sketch,
-            sketch_entry: None,
+            sketch_entry: self.part_edit_scope.as_ref().and(self.sketch_entry.clone()),
             feature_edit_sketch: self.feature_edit_sketch,
             selection: self.selection.clone(),
             path: None,
@@ -1729,6 +1950,8 @@ impl Session {
             live_links: None,
             active_component: self.active_component,
             active_occurrence_path: self.active_occurrence_path.clone(),
+            part_edit_scope: self.part_edit_scope.clone(),
+            part_scope_probe: self.part_scope_probe,
             pending_moves: self.pending_moves.clone(),
             world_cache: std::sync::Mutex::new(self.world_cache.lock().ok().and_then(|cache| cache.clone())),
             joints_settled: self.joints_settled.clone(),
@@ -1791,7 +2014,18 @@ impl Session {
         if expected != *source.doc {
             return Err(EngineError::Other("the original editor model does not match its source design".into()));
         }
-        self.compute_commands_inner(commands, Some(original.doc.marker), Some(original))
+        // The live editor's marker is temporarily rolled back. Compare the final result to
+        // the complete original assembly, not to that intermediate, incomplete model.
+        let boundary = self.part_edit_scope.as_ref().map(|scope| {
+            let mut baseline = original.scratch();
+            baseline.part_edit_scope = Some(scope.clone());
+            baseline
+        });
+        let prepared = self.compute_commands_inner(commands, Some(original.doc.marker), Some(original))?;
+        if let Some(baseline) = boundary {
+            baseline.check_part_result(&prepared.computed)?;
+        }
+        Ok(prepared)
     }
 
     fn compute_commands_inner(
@@ -1802,6 +2036,11 @@ impl Session {
     ) -> Result<ComputedCommands> {
         let editor_original = original.as_ref().map(|session| session.doc.clone());
         let mut computed = self.scratch();
+        // Intermediate editor states can omit the part and downstream bodies entirely. The
+        // complete transaction is checked against the pinned original by the caller.
+        if editor_original.is_some() && computed.part_edit_scope.is_some() {
+            computed.part_scope_probe = true;
+        }
         let mut steps = Vec::new();
         if let Some(marker) = marker {
             let before = computed.doc.clone();
@@ -1837,6 +2076,7 @@ impl Session {
         }
         // What the source was primed with stays out of the session that is adopted (#6901).
         computed.unprime();
+        computed.part_scope_probe = false;
         Ok(ComputedCommands { source: self, computed, steps, editor_original })
     }
 
@@ -1867,6 +2107,7 @@ impl Session {
 
     fn same_document_context(&self, source: &Session) -> bool {
         Arc::ptr_eq(&self.doc, &source.doc)
+            && self.part_edit_scope == source.part_edit_scope
             && self
                 .revision
                 .checked_sub(source.revision)
@@ -1939,6 +2180,12 @@ impl Session {
             before.visibility.hidden_bodies.clone_from(&self.visibility.hidden_bodies);
         }
         let rename = computed.body_rename(&self.doc);
+        if let Some((old, new, _)) = &rename
+            && let Some((_, selected)) = self.part_edit_scope.as_mut()
+            && selected == old
+        {
+            selected.clone_from(new);
+        }
         computed.visibility.hidden_bodies.clone_from(&self.visibility.hidden_bodies);
         computed.remap_hidden_bodies(&self.doc, &self.model.state(), rename.as_ref().map(|(old, new, _)| (old.as_str(), new.as_str())));
         self.visibility.hidden_bodies = std::mem::take(&mut computed.visibility.hidden_bodies);
@@ -2270,4 +2517,80 @@ fn same_but_features(a: &Document, b: &Document) -> bool {
         && *named_views == b.named_views
         && *visibility == b.visibility
         && *next_component_color_index == b.next_component_color_index
+}
+
+#[cfg(test)]
+mod part_scope_regression_tests {
+    use super::Session;
+    use serde_json::{json, Value};
+
+    fn run(s: &mut Session, id: &str, params: Value) -> Value {
+        s.execute(id, &params).unwrap_or_else(|e| panic!("{id}: {e}"))
+    }
+
+    #[test]
+    fn scoped_sketch_edit_restores_the_full_assembly_and_rejects_new_bodies() {
+        let mut s = Session::default();
+        let sketch = run(&mut s, "sketch.create", json!({"plane":"XY"}))["sketch"].as_u64().unwrap();
+        run(&mut s, "sketch.line", json!({"points":[[0,0],[10,0],[10,10],[0,10]],"closed":true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"distance":10,"body_names":["Tray"]}));
+        run(&mut s, "solid.box", json!({"length":5,"width":5,"height":5,"corner":[30,0,0],"operation":"new","body_name":"Other"}));
+        s.set_part_edit_scope(Some((0, "Tray".into())));
+        let before = s.doc.to_json();
+        assert!(s.execute("solid.box", &json!({"length":1,"width":1,"height":1,"operation":"new"})).is_err());
+        assert_eq!(s.doc.to_json(), before);
+        assert!(s.execute("doc.open", &json!({"path":"nonexistent.step"})).is_err());
+        assert_eq!(s.doc.to_json(), before);
+        run(&mut s, "sketch.edit", json!({"sketch":sketch,"restore_marker":null}));
+        run(&mut s, "sketch.line", json!({"points":[[20,20],[21,21]],"construction":true}));
+        assert!(s.execute("sketch.finish", &json!({"restore_marker":false})).is_err());
+        assert!(s.execute("sketch.cancel", &json!({"restore_marker":false})).is_err());
+        run(&mut s, "sketch.finish", json!({}));
+        assert!(s.model.state().body("Tray").is_some());
+        assert!(s.model.state().body("Other").is_some());
+        let after = s.doc.to_json();
+        run(&mut s, "sketch.edit", json!({"sketch":sketch,"restore_marker":null}));
+        run(&mut s, "sketch.line", json!({"points":[[30,20],[31,21]],"construction":true}));
+        run(&mut s, "sketch.cancel", json!({}));
+        assert_eq!(s.doc.to_json(), after, "cancel restores the complete assembly");
+    }
+
+    #[test]
+    fn scoped_sketch_edit_rejects_changes_to_a_shared_sibling() {
+        let mut s = Session::default();
+        let sketch = run(&mut s, "sketch.create", json!({"plane":"XY"}))["sketch"].as_u64().unwrap();
+        run(&mut s, "sketch.line", json!({"ids":["l1","l2","l3","l4"],"points":[[0,0],[10,0],[10,10],[0,10]],"closed":true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch":sketch,"distance":10,"operation":"new","body_names":["Tray"]}));
+        run(&mut s, "solid.extrude", json!({"sketch":sketch,"distance":5,"operation":"new","body_names":["Other"]}));
+        s.set_part_edit_scope(Some((0, "Tray".into())));
+        run(&mut s, "sketch.edit", json!({"sketch":sketch,"restore_marker":null}));
+        let before = s.doc.to_json();
+        let error = s.execute("sketch.move_point", &json!({"point":"l1.start","to":[-2,0]})).unwrap_err();
+        assert!(error.to_string().contains("another body"), "unexpected error: {error}");
+        assert_eq!(s.doc.to_json(), before, "a shared-sketch edit must fail atomically");
+        run(&mut s, "sketch.cancel", json!({}));
+        assert!(s.model.state().body("Tray").is_some() && s.model.state().body("Other").is_some());
+    }
+
+    #[test]
+    fn terminal_box_proof_rejects_changed_inputs_dependencies_and_later_features() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Other"}));
+        let body = s.model.state().body("Other").unwrap().clone();
+        let mut changed = s.scratch();
+        let feature_id = body.feature;
+        if let solidcraft_doc::FeatureKind::Box { length, .. } = &mut changed.doc_mut().feature_mut(feature_id).unwrap().kind {
+            *length = "12".into();
+        }
+        assert!(!s.independent_terminal_box_unchanged(&changed, &body, &body), "changed dimensions must not be treated as equal");
+        let mut dependent = s.scratch();
+        if let solidcraft_doc::FeatureKind::Box { length, .. } = &mut dependent.doc_mut().feature_mut(feature_id).unwrap().kind {
+            *length = "dependent_length".into();
+        }
+        assert!(!dependent.independent_terminal_box_unchanged(&dependent, &body, &body), "referenced parameters can depend on earlier features");
+        run(&mut s, "solid.box", json!({"length":2,"width":2,"height":2,"operation":"new","body_name":"Later"}));
+        assert!(!s.independent_terminal_box_unchanged(&s, &body, &body), "a later feature can modify the body");
+    }
 }

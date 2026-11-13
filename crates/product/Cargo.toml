@@ -1,0 +1,13 @@
+[package]
+name = "solidcraft-product"
+description = "Product identity for SolidCraft-derived applications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+brand-hasisolid = []
+brand-mssolid = []

@@ -409,6 +409,9 @@ pub struct FlangeParams {
     /// Refused on a base or contour flange.
     #[serde(default)]
     pub corner_relief: Option<LengthExpr>,
+    /// Edge: the gap between meeting flanges in this feature. Default: the sheet's rule.
+    #[serde(default)]
+    pub corner_gap: Option<LengthExpr>,
     /// Edge: further bends, each a flange on the far edge of the one before (at most 16). Refused
     /// on a base or contour flange.
     #[serde(default)]

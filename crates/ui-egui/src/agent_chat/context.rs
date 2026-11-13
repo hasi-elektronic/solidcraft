@@ -90,7 +90,8 @@ impl Context {
             return String::new();
         }
         let mut out = format!(
-            "[Selected in SolidCraft when this message was sent: {} item(s). The names, indices and points are the ones the tools take.]",
+            "[Selected in {} when this message was sent: {} item(s). The names, indices and points are the ones the tools take.]",
+            solidcraft_engine::product::PRODUCT.name,
             self.total()
         );
         for kind in Kind::ALL {

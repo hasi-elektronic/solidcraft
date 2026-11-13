@@ -96,9 +96,14 @@ pub const CLIENTS: &[&str] = &["opencode", "claude-desktop", "claude-code", "cur
 
 /// The server entries to write: `solidcraft`, and `solidcraft-live` with `--live`.
 fn servers(live: bool) -> Vec<(&'static str, Vec<&'static str>)> {
-    let mut v = vec![("solidcraft", vec!["mcp"])];
+    let (name, live_name) = match crate::product::PRODUCT.name {
+        "HasiSolid" => ("hasisolid", "hasisolid-live"),
+        "MSSolid" => ("mssolid", "mssolid-live"),
+        _ => ("solidcraft", "solidcraft-live"),
+    };
+    let mut v = vec![(name, vec!["mcp"])];
     if live {
-        v.push(("solidcraft-live", vec!["mcp", "--connect", LIVE_ADDR]));
+        v.push((live_name, vec!["mcp", "--connect", LIVE_ADDR]));
     }
     v
 }
@@ -236,7 +241,11 @@ enum Verdict {
 fn is_solidcraft_cli(command: &str) -> bool {
     let name = command.rsplit(['/', '\\']).next().unwrap_or(command).to_ascii_lowercase();
     let stem = name.strip_suffix(".exe").unwrap_or(&name);
-    stem == "solidcraft-cli" || stem == "solvecraft-cli"
+    if crate::product::PRODUCT.branded {
+        stem == format!("{}-cli", crate::product::PRODUCT.name.to_ascii_lowercase())
+    } else {
+        stem == "solidcraft-cli" || stem == "solvecraft-cli"
+    }
 }
 
 /// The command and arguments of an entry, whether it spells them as `command` + `args` or as
@@ -653,6 +662,9 @@ fn configure_file(t: &Target, exe: &str, live: bool, dry_run: bool, mode: Mode) 
 pub fn setup(args: &[String], env: &Env, exe: &str) -> Result<(Vec<String>, bool), String> {
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let live = args.iter().any(|a| a == "--live");
+    if live && crate::product::PRODUCT.branded {
+        return Err("mcp setup: --live is not supported for this product; use automatic port discovery".into());
+    }
     let mut only = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -705,7 +717,7 @@ pub fn quiet(env: &Env, exe: &str, remove: bool) -> Quiet {
         // Adding writes `solidcraft` only (plain `mcp` finds the app by itself); removing also
         // takes out a `solidcraft-live` that is ours.
         let Ok((_, changes)) = configure_file(&t, exe, remove, false, mode) else { continue };
-        if changes.iter().any(|(n, c)| *n == "solidcraft" && *c == Change::Added) {
+        if changes.iter().any(|(n, c)| servers(false).first().is_some_and(|(name, _)| n == name) && *c == Change::Added) {
             q.added.push(t.client);
         }
         if changes.iter().any(|(_, c)| *c == Change::Removed) {
@@ -715,7 +727,7 @@ pub fn quiet(env: &Env, exe: &str, remove: bool) -> Quiet {
     q
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(feature = "brand-hasisolid", feature = "brand-mssolid"))))]
 mod tests {
     use super::*;
 
@@ -863,5 +875,73 @@ mod tests {
         assert_eq!(quiet(&env, EXE, true).removed, ["cursor", "gemini"]);
         assert!(!std::fs::read_to_string(h.join(".cursor/mcp.json")).unwrap().contains("solidcraft"));
         let _ = std::fs::remove_dir_all(&h);
+    }
+}
+
+#[cfg(all(test, any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
+mod branded_tests {
+    use super::*;
+
+    #[test]
+    fn add_and_remove_preserve_other_products() {
+        let name = match crate::product::PRODUCT.name {
+            "HasiSolid" => "hasisolid",
+            "MSSolid" => "mssolid",
+            _ => panic!("expected branded product"),
+        };
+        let exe = format!("/opt/{name}/{name}-cli");
+        let other_brand = if name == "hasisolid" { "mssolid" } else { "hasisolid" };
+        let original = format!(
+            r#"{{"mcpServers":{{"solidcraft":{{"command":"/opt/solidcraft/solidcraft-cli","args":["mcp"]}},"{other_brand}":{{"command":"/{other_brand}-cli","args":["mcp"]}},"other":{{"command":"other","args":[]}}}}}}"#
+        );
+        let mut text = original;
+        edit_json(&mut text, Shape::McpServers, &exe, false, Mode::Add).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["mcpServers"]["solidcraft"]["command"], "/opt/solidcraft/solidcraft-cli");
+        assert_eq!(doc["mcpServers"][other_brand]["command"], format!("/{other_brand}-cli"));
+        assert_eq!(doc["mcpServers"][name]["command"], exe);
+        edit_json(&mut text, Shape::McpServers, &exe, false, Mode::Remove).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert!(doc["mcpServers"].get(name).is_none());
+        assert_eq!(doc["mcpServers"]["solidcraft"]["command"], "/opt/solidcraft/solidcraft-cli");
+        assert_eq!(doc["mcpServers"][other_brand]["command"], format!("/{other_brand}-cli"));
+        assert_eq!(doc["mcpServers"]["other"]["command"], "other");
+    }
+
+    #[test]
+    fn live_setup_is_rejected_before_touching_client_files() {
+        let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let home = std::env::temp_dir().join(format!("solidcraft-brand-setup-{}-{id}", std::process::id()));
+        let cursor = home.join(".cursor");
+        std::fs::create_dir_all(&cursor).unwrap();
+        let file = cursor.join("mcp.json");
+        let original = br#"{"mcpServers":{"solidcraft":{"command":"keep","args":[]}}}"#;
+        std::fs::write(&file, original).unwrap();
+        let env = Env { home: Some(home.clone()), appdata: None, local_appdata: None, xdg_config: None, codex_home: None };
+        assert!(setup(&["--live".into()], &env, "unused").is_err());
+        assert_eq!(std::fs::read(&file).unwrap().as_slice(), original.as_slice());
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(cursor).unwrap();
+        std::fs::remove_dir(home).unwrap();
+    }
+
+    #[test]
+    fn codex_toml_and_custom_entries_are_preserved() {
+        let name = crate::product::PRODUCT.xdg_folder;
+        let exe = format!("/opt/{name}/{name}-cli");
+        let original = "# settings\n[mcp_servers.solidcraft]\ncommand = \"/opt/solidcraft/solidcraft-cli\"\nargs = [\"mcp\"]\n";
+        let mut text = original.to_owned();
+        edit_toml(&mut text, &exe, false, Mode::Add).unwrap();
+        assert!(text.contains(original));
+        assert!(text.contains(&format!("[mcp_servers.{name}]")));
+        edit_toml(&mut text, &exe, false, Mode::Remove).unwrap();
+        assert!(text.contains("[mcp_servers.solidcraft]"));
+        assert!(!text.contains(&format!("[mcp_servers.{name}]")));
+        let mut custom = format!("[mcp_servers.{name}]\ncommand = \"custom\"\nargs = [\"mcp\"]\n");
+        let before = custom.clone();
+        edit_toml(&mut custom, &exe, false, Mode::Remove).unwrap();
+        assert_eq!(custom, before);
+        assert!(is_solidcraft_cli(&exe));
+        assert!(!is_solidcraft_cli("/opt/solidcraft/solidcraft-cli"));
     }
 }

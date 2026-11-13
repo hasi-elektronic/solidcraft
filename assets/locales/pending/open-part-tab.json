@@ -1,0 +1,58 @@
+{
+  "ar": {
+    "ui.open_part_extracted_not_opened": "تم ربط ملف الجزء ولكن لم يُفتح. يعيد التراجع التجميع وتبقى نسخة الجزء.",
+    "ui.open_part_finish_first": "أكمل تحرير الجزء أولاً لتحديث التجميع.",
+    "ui.open_part_shared": "هذا الجزء مستخدم عدة مرات في التجميع. ستنعكس التغييرات المحفوظة على جميع نسخه المرتبطة.",
+    "ui.open_part_tab": "تحرير الجزء منفرداً في علامة تبويب جديدة",
+    "ui.open_part_unsupported": "تعذر فتح الجزء المحدد بأمان. تحقق من الجزء والموضع المحددين."
+  },
+  "de": {
+    "ui.open_part_extracted_not_opened": "Das Teil wurde als Datei verknüpft, aber nicht geöffnet. Die Baugruppe kann mit Rückgängig wiederhergestellt werden; die Teil-Datei bleibt erhalten.",
+    "ui.open_part_finish_first": "Bitte zuerst die Einzelteilbearbeitung abschließen, damit die Baugruppe aktualisiert wird.",
+    "ui.open_part_shared": "Dieses Teil wird mehrfach in der Baugruppe verwendet. Gespeicherte Änderungen gelten für alle verknüpften Platzierungen.",
+    "ui.open_part_tab": "Teil einzeln im neuen Tab bearbeiten",
+    "ui.open_part_unsupported": "Das gewählte Teil kann nicht sicher geöffnet werden. Prüfen Sie die Auswahl und Platzierung."
+  },
+  "en": {
+    "ui.open_part_extracted_not_opened": "The part file was linked but not opened. Undo restores the assembly; the new part file remains.",
+    "ui.open_part_finish_first": "Finish editing the part first so that the assembly is updated.",
+    "ui.open_part_shared": "This part is used more than once in the assembly. Saved changes apply to every linked placement.",
+    "ui.open_part_tab": "Edit Part Separately in New Tab",
+    "ui.open_part_unsupported": "The selected part cannot be opened safely. Check the selected part and placement."
+  },
+  "he": {
+    "ui.open_part_extracted_not_opened": "קובץ החלק קושר אך לא נפתח. ביטול הפעולה משחזר את המכלול וקובץ החלק נשאר.",
+    "ui.open_part_finish_first": "יש לסיים תחילה את עריכת החלק כדי לעדכן את המכלול.",
+    "ui.open_part_shared": "החלק מופיע כמה פעמים במכלול. השינויים השמורים יחולו על כל המופעים המקושרים.",
+    "ui.open_part_tab": "עריכת החלק בנפרד בכרטיסייה חדשה",
+    "ui.open_part_unsupported": "לא ניתן לפתוח את החלק שנבחר בבטחה. יש לבדוק את החלק והמיקום שנבחרו."
+  },
+  "ja": {
+    "ui.open_part_extracted_not_opened": "部品ファイルはリンクされましたが開けませんでした。元に戻すとアセンブリが復元されます。部品ファイルは残ります。",
+    "ui.open_part_finish_first": "アセンブリを更新するため、先に部品の編集を完了してください。",
+    "ui.open_part_shared": "この部品はアセンブリで複数回使用されています。保存した変更はリンクされたすべての配置に反映されます。",
+    "ui.open_part_tab": "部品を新しいタブで個別に編集",
+    "ui.open_part_unsupported": "選択した部品を安全に開けません。部品と配置を確認してください。"
+  },
+  "ko": {
+    "ui.open_part_extracted_not_opened": "부품 파일이 연결되었지만 열리지 않았습니다. 실행 취소로 조립품을 복원할 수 있으며 부품 파일은 유지됩니다.",
+    "ui.open_part_finish_first": "조립품을 업데이트하려면 먼저 부품 편집을 완료하세요.",
+    "ui.open_part_shared": "이 부품은 조립품에 여러 번 사용됩니다. 저장된 변경 사항은 연결된 모든 배치에 적용됩니다.",
+    "ui.open_part_tab": "새 탭에서 부품을 개별 편집",
+    "ui.open_part_unsupported": "선택한 부품을 안전하게 열 수 없습니다. 선택한 부품과 배치를 확인하세요."
+  },
+  "vi": {
+    "ui.open_part_extracted_not_opened": "Tệp chi tiết đã được liên kết nhưng chưa mở. Hoàn tác sẽ khôi phục cụm lắp ráp; tệp chi tiết vẫn được giữ lại.",
+    "ui.open_part_finish_first": "Hãy hoàn tất chỉnh sửa chi tiết trước để cập nhật cụm lắp ráp.",
+    "ui.open_part_shared": "Chi tiết này được dùng nhiều lần trong cụm lắp ráp. Thay đổi đã lưu sẽ áp dụng cho tất cả vị trí được liên kết.",
+    "ui.open_part_tab": "Sửa riêng chi tiết trong thẻ mới",
+    "ui.open_part_unsupported": "Không thể mở an toàn chi tiết đã chọn. Hãy kiểm tra chi tiết và vị trí đã chọn."
+  },
+  "zh": {
+    "ui.open_part_extracted_not_opened": "零件文件已链接但未打开。撤销可恢复装配体；零件文件仍会保留。",
+    "ui.open_part_finish_first": "请先完成零件编辑，以便更新装配体。",
+    "ui.open_part_shared": "此零件在装配体中使用了多次。保存的更改将应用于所有关联放置。",
+    "ui.open_part_tab": "在新标签页中单独编辑零件",
+    "ui.open_part_unsupported": "无法安全打开所选零件。请检查所选零件和放置位置。"
+  }
+}

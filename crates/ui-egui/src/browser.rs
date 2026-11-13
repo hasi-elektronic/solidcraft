@@ -1239,7 +1239,11 @@ fn browser_header(app: &mut SolveApp, ui: &mut egui::Ui, collapsible: bool) {
         crate::ui_kit::disclosure(ui.painter(), pos2(right - t.form_section_icon_size / 2.0, rect.center().y), !collapsed, t.text_dim);
         right -= 18.0;
     }
-    let bodies = app.session.model.state().bodies.len();
+    let bodies = if crate::documents::component_view_active(app) {
+        app.session.world_state().bodies.iter().filter(|body| app.body_visible(&body.name)).count()
+    } else {
+        app.session.model.state().bodies.len()
+    };
     let key = if bodies == 1 { "ui.browser_bodies_one" } else { "ui.browser_bodies_other" };
     let count = crate::i18n::format(key, &[("count", &bodies.to_string())]);
     let galley = ui.painter().layout_no_wrap(count, FontId::proportional(t.font_body), t.text_dim);
@@ -1346,6 +1350,10 @@ fn rows_scrolling(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions, shr
                     component_rows(app, ui, 0, 1, acts, &mut cache);
                 }
                 crate::render_workspace::scene::output(app, ui);
+            } else if crate::documents::component_view_has_body(app) {
+                body_view_rows(app, ui, acts);
+            } else if let Some(path) = crate::documents::component_view_path(app).map(<[u64]>::to_vec) {
+                occurrence_rows(app, ui, &path, 0, acts, &mut cache);
             } else {
                 component_rows(app, ui, 0, 0, acts, &mut cache);
             }
@@ -1354,6 +1362,19 @@ fn rows_scrolling(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions, shr
     // either way the reveal is done.
     app.tree.reveal = None;
     app.tree.cache = Some(cache);
+}
+
+/// A body's tab must not expose the component row or folders: their eye, selection and drop
+/// actions apply to sibling bodies too. Draw just the chosen body and its relevant history.
+fn body_view_rows(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions) {
+    let Some(path) = crate::documents::component_view_path(app).map(<[u64]>::to_vec) else { return };
+    let Some(name) = crate::documents::component_view_selected_body(app) else { return };
+    let world = app.session.world_state();
+    let Some(body) = world.body(&name) else { return };
+    let component = body.component;
+    let entry = Entry::body(app, body, name);
+    entry_row(app, ui, component, Some(&path), "bodies", &entry, 0, None, &[], false, acts);
+    features::body_view_rows(app, ui, 0);
 }
 
 /// The Bodies folder and the Origin at the top of the vertical History (Preferences › Interface:
@@ -1378,8 +1399,12 @@ pub(crate) fn history_rows(app: &mut SolveApp, ui: &mut egui::Ui) {
     app.tree.cache = Some(cache);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        folder_rows_at(app, ui, component, path.as_deref(), "bodies", 0, &mut acts, &bodies);
-        origin_rows(app, ui, 0, &mut acts);
+        if crate::documents::component_view_has_body(app) {
+            body_view_rows(app, ui, &mut acts);
+        } else {
+            folder_rows_at(app, ui, component, path.as_deref(), "bodies", 0, &mut acts, &bodies);
+            origin_rows(app, ui, 0, &mut acts);
+        }
     });
     app.tree.reveal = reveal;
     // The browser's own rows reuse these order slots (`TreeState::remember`).
@@ -2974,6 +2999,11 @@ fn entry_row(
     }
     if patterns_open && let Some(Sel::Feature { id }) = &e.sel {
         crate::sketch_pattern_tree::rows(app, ui, *id, depth + 1, "browser", path.map(|path| (comp, path)), !visible || parent_hidden);
+    }
+    // Reordering or moving a body via a folder/group changes the surrounding component. Keep
+    // these interactions in the assembly browser, where all affected items are visible.
+    if crate::documents::component_view_has_body(app) {
+        return;
     }
     let Some(resp) = &r.resp else { return };
     // Drag: the selected items of this folder when this one is selected, else just this one.

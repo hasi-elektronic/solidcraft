@@ -7,6 +7,92 @@ use std::sync::OnceLock;
 
 type Messages = BTreeMap<String, String>;
 
+/// Only display strings whose references to SolidCraft mean this running app.
+/// Catalog keys and canonical values stay untouched for legacy label lookup.
+fn product_display(id: &str, text: &str) -> String {
+    let product = solidcraft_engine::product::PRODUCT;
+    if !product.branded {
+        return text.to_owned();
+    }
+    let own_product = matches!(
+        id,
+        "About SolidCraft"
+            | "Reopen the designs that were open when SolidCraft was last closed"
+            | "SolidCraft cannot submit reports directly. Submit on GitHub; no token is needed in the app."
+            | "SolidCraft closed before these designs were saved. Their last autosave can be opened."
+            | "ai.connected_toast"
+            | "ai.prefs.allow_control_note"
+            | "ai.prefs.connect_apps"
+            | "ai.prefs.connect_apps_note"
+            | "ai.prefs.connect_at_start"
+            | "ai.prefs.connect_at_start_note"
+            | "ai.prefs.open_at_start"
+            | "ai.prefs.open_at_start_note"
+            | "ai.prefs.permission_all_summary"
+            | "ai.prefs.permission_scope"
+            | "crash.announce"
+            | "crash.previous_session"
+            | "help.connect_note"
+            | "help.font_details"
+            | "home.recovery_hint"
+            | "install.button_tip"
+            | "install.dock_after"
+            | "install.home_screen_after"
+            | "install.title"
+            | "prefs.anti_aliasing_amd_dx12"
+            | "prefs.graphics_card_restart"
+            | "prefs.interface_note"
+            | "prefs.max_file_size_flag"
+            | "prefs.theme_paste_none"
+            | "render.gpu_path_first_setup"
+            | "settings.msaa_applies_on_restart"
+            | "settings.reset_intro"
+            | "ui.3d_mouse_calibrate_tip"
+            | "ui.3d_mouse_calibrate_wait"
+            | "ui.3d_mouse_denied"
+            | "ui.agent_chat_auth_env"
+            | "ui.agent_chat_auth_needed"
+            | "ui.agent_chat_flatpak_none_found"
+            | "ui.agent_chat_intro"
+            | "ui.agent_chat_model_no_tools"
+            | "ui.agent_chat_no_tool_call"
+            | "ui.agent_chat_privacy_note"
+            | "ui.agent_chat_setup_body"
+            | "ui.ai_agent_mode_tip"
+            | "ui.ai_auto_ours"
+            | "ui.ai_key_note"
+            | "ui.ai_modes_scope"
+            | "ui.easyprint_consent"
+            | "ui.edit_in_place_open_elsewhere"
+            | "ui.nav_bridge_tip"
+            | "ui.plugins_note"
+            | "update.available"
+            | "update.dmg_opened"
+            | "update.install_msi"
+            | "update.installed"
+            | "update.installer_started"
+            | "update.managed"
+            | "update.prefs_flatpak"
+            | "update.prefs_managed"
+            | "update.prefs_note"
+            | "update.up_to_date"
+            | "web.open_full"
+    );
+    let mut result = if own_product { text.replace("SolidCraft", product.name) } else { text.to_owned() };
+    if id == "document.open_elsewhere_detail" {
+        // The lock records the actual owner, which may be a different product.
+        result = result.replace("SolidCraft {app}", "{app}");
+    }
+    if id == "ai.prefs.connect_apps_note" {
+        result = result.replace("solidcraft", product.xdg_folder);
+    }
+    if id == "ui.agent_chat_no_cli" {
+        let cli = if cfg!(windows) { format!("{}-cli", product.name) } else { format!("{}-cli", product.xdg_folder) };
+        result = result.replace("solidcraft-cli", &cli);
+    }
+    result
+}
+
 /// Register locales here after adding their catalogs. Missing translations use English.
 pub struct Catalog {
     pub id: &'static str,
@@ -38,10 +124,9 @@ impl Catalog {
     fn shown(&'static self) -> &'static Messages {
         let shown = self.shown.get_or_init(|| {
             let messages = self.messages();
-            messages
-                .values()
-                .any(|text| crate::bidi::has_rtl(text))
-                .then(|| messages.iter().map(|(id, text)| (id.clone(), crate::bidi::visual_template(text).into_owned())).collect())
+            (solidcraft_engine::product::PRODUCT.branded || messages.values().any(|text| crate::bidi::has_rtl(text))).then(|| {
+                messages.iter().map(|(id, text)| (id.clone(), crate::bidi::visual_template(&product_display(id, text)).into_owned())).collect()
+            })
         });
         match shown {
             Some(shown) => shown,
@@ -220,7 +305,7 @@ impl Locale {
 
     /// Stable message ID → translation → English → ID, in display order (see [`crate::bidi`]).
     pub fn text(self, id: &str) -> &str {
-        self.0.shown().get(id).or_else(|| ENGLISH.messages().get(id)).map_or(id, String::as_str)
+        self.0.shown().get(id).or_else(|| ENGLISH.shown().get(id)).map_or(id, String::as_str)
     }
 
     /// Translate source labels from engine/UI tables, preserving unknown labels.
@@ -240,9 +325,14 @@ impl Locale {
             ids
         });
         if let Some(candidates) = ids.get(label) {
-            // Preserve the old last-ID preference among available translations. A new
-            // English-only alias must not hide a translation that already exists here.
-            if let Some(text) = candidates.iter().rev().find_map(|id| self.0.shown().get(*id)) {
+            // These established engine labels must not be shadowed by the newer
+            // render aliases. Other ambiguous captions retain their existing
+            // ordering until their callers can pass a context-specific ID.
+            let translated = |id: &&str| self.0.shown().get(*id);
+            let preferred = matches!(label, "Appearance" | "Checkpoint")
+                .then(|| candidates.iter().rev().filter(|id| !id.starts_with("render.")).find_map(translated))
+                .flatten();
+            if let Some(text) = preferred.or_else(|| candidates.iter().rev().find_map(translated)) {
                 return text;
             }
             if let Some(id) = candidates.last() {
@@ -475,8 +565,8 @@ mod tests {
         assert_eq!(super::Locale::for_language("zh-TW").name(), "繁體中文");
         assert_eq!(super::effective_language("de"), "de");
         assert_eq!(super::effective_language("ja"), "ja");
-        // A first start has no saved language: the default follows the system.
-        assert_eq!(crate::prefs::Prefs::default().language, super::SYSTEM);
+        // Branded builds start in German; upstream follows the system. A saved value wins for both.
+        assert_eq!(crate::prefs::Prefs::default().language, if solidcraft_engine::product::PRODUCT.branded { "de" } else { super::SYSTEM });
         // A saved choice in the settings file wins over the default.
         let saved: crate::prefs::Prefs = serde_json::from_str(r#"{"language":"ja"}"#).unwrap();
         assert_eq!(saved.language, "ja");
@@ -505,6 +595,30 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn product_display_preserves_canonical_labels_and_user_values() {
+        let product = solidcraft_engine::product::PRODUCT;
+        for language in ["en", "de"] {
+            let locale = Locale::for_language(language);
+            let own = locale.text("ui.agent_chat_model_no_tools");
+            assert!(own.contains(product.name), "{language}: {own}");
+            assert!(own.contains("{model}"));
+            let mcp = locale.text("ai.prefs.connect_apps_note");
+            assert!(mcp.contains(product.xdg_folder), "{language}: {mcp}");
+            let label = locale.label("About SolidCraft");
+            assert!(label.contains(product.name), "{language}: {label}");
+            let detail = locale.text("document.open_elsewhere_detail");
+            assert!(detail.contains("{app}"));
+            if product.branded {
+                assert!(!detail.contains("SolidCraft {app}"));
+            }
+        }
+        assert_eq!(product_display("unrelated", "SolidCraft attribution"), "SolidCraft attribution");
+        assert_eq!(ENGLISH.messages().get("About SolidCraft").map(String::as_str), Some("About SolidCraft"));
+        let rendered = Locale::for_language("en").format("ui.agent_chat_model_no_tools", &[("model", "SolidCraft model")]);
+        assert!(rendered.contains("SolidCraft model"));
+    }
+
     /// Strings a pull request adds under `assets/locales/pending/` work before they are folded
     /// into the catalogs (the build merges them in).
     #[test]
@@ -516,7 +630,7 @@ mod tests {
                 for (id, text) in messages {
                     // The catalogs hand right-to-left text out in display order (`crate::bidi`);
                     // pending files hold it in reading order, as the catalogs do (#7527).
-                    assert_eq!(Locale::for_language(&locale).text(&id), crate::bidi::visual_template(&text), "{locale}: {id}");
+                    assert_eq!(Locale::for_language(&locale).text(&id), crate::bidi::visual_template(&product_display(&id, &text)), "{locale}: {id}");
                 }
             }
         }
@@ -560,6 +674,21 @@ mod tests {
         assert_eq!(alias.label("Pitch"), "mechanical pitch");
         assert_eq!(alias.label("coupling.pitch"), "mechanical pitch");
         assert_eq!(alias.label("original unknown caption"), "original unknown caption");
+    }
+
+    #[test]
+    fn render_alias_does_not_override_an_established_label() {
+        static BOTH: Catalog = Catalog::new(
+            "test-both",
+            "Test",
+            r#"{"cmd.appearance_assign":"General","render.page_appearance":"Render","cmd.occurrence_ground":"Festsetzen","render.environment.sky_ground":"Boden"}"#,
+        );
+        static RENDER_ONLY: Catalog = Catalog::new("test-render", "Test", r#"{"render.page_appearance":"Render"}"#);
+        let both = Locale(&BOTH);
+        assert_eq!(both.label("Appearance"), "General");
+        assert_eq!(both.label("render.page_appearance"), "Render");
+        assert_eq!(both.label("Ground"), "Boden");
+        assert_eq!(Locale(&RENDER_ONLY).label("Appearance"), "Render");
     }
 
     #[test]
@@ -646,12 +775,12 @@ mod tests {
     }
 
     /// Catalogs delivered complete. English is the source catalog; Arabic, Czech, Italian, Japanese and Chinese
-    /// are complete. German, Korean, Malay, Russian, French and Ukrainian
-    /// are partial (German and Korean predate the coverage guards; Russian, French and Ukrainian
+    /// are complete. German is also covered. Korean, Malay, Russian, French and Ukrainian
+    /// are partial (Korean predates the coverage guards; Russian, French and Ukrainian
     /// are kept partial so a new label doesn't need more translations), so their gaps fall back
     /// to English and are reported by `cargo xtask i18n` without failing the build, while
     /// nothing in the complete catalogs may regress.
-    const COMPLETE: &[&str] = &["ar", "he", "ja", "vi", "zh"];
+    const COMPLETE: &[&str] = &["ar", "de", "he", "ja", "vi", "zh"];
 
     /// `text()` falls back to English silently, so a message a complete locale never received is
     /// shown in English inside an otherwise translated UI, with nothing in the build to say so.

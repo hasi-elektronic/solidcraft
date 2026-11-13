@@ -65,6 +65,41 @@ fn shown_features(app: &SolveApp, compact: bool) -> usize {
     if !compact && app.dialog.as_ref().is_some_and(|d| d.editing.is_some()) { app.session.doc.marker.unwrap_or(n) } else { n }
 }
 
+/// Show only history associated with the chosen body. Shared or ambiguous features are
+/// read-only; features proven exclusive can still be edited through the scoped editor.
+pub(super) fn body_view_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
+    let rows: Vec<_> = app
+        .session
+        .doc
+        .features
+        .iter()
+        .filter(|f| crate::documents::component_view_feature(app, f.id))
+        .map(|f| (f.id, f.name.clone(), crate::timeline::icon_of(&f.kind), crate::documents::component_view_feature_editable(app, f.id)))
+        .collect();
+    let mut edit = None;
+    for (id, name, icon, editable) in rows {
+        let row = draw_row(ui, ui.id().with(("body_view_feature", id)), &Row { depth, icon, label: &name, dim: !editable, ..Default::default() });
+        if editable && row.double {
+            edit = Some(id);
+        }
+        if let Some(response) = &row.resp {
+            let tip = if editable { crate::i18n::tr_label("Edit Feature") } else { crate::i18n::tr("ui.part_view_feature_in_assembly") };
+            response.clone().on_hover_text(tip);
+            if editable {
+                crate::ui_kit::Menu::context(response, |ui| {
+                    if crate::context_menu::button(ui, crate::i18n::tr_label("Edit Feature"), "edit").clicked() {
+                        edit = Some(id);
+                        ui.close();
+                    }
+                });
+            }
+        }
+    }
+    if let Some(id) = edit {
+        app.edit_feature(id);
+    }
+}
+
 pub(super) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, component: u64, path: &[u64], depth: usize, acts: &mut Actions) {
     // Compact history: every feature of the component, sketches too, in history order with the
     // marker, in place of the timeline.

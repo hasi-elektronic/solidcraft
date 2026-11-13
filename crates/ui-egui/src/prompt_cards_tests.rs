@@ -119,6 +119,7 @@ fn section_card_keeps_its_distance_and_flip() {
 fn save_prompt_moves_between_its_actions_with_the_arrow_keys() {
     use crate::documents::Answer;
     let mut h = Harness::new();
+    h.app.preferences.language = "en".into();
     h.app.home.open = false;
     h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
     h.app.docs.closing = Some(h.app.docs.active);
@@ -128,20 +129,21 @@ fn save_prompt_moves_between_its_actions_with_the_arrow_keys() {
         assert!(scenario::handle_at(&format!("dialog:{label}")).is_some(), "{label}");
     }
     assert_eq!(h.app.docs.choice, Answer::Save);
-    // The ghost action is at the left: Don't Save, Cancel, Save. Arrows follow that order.
+    // Cancel, Don't Save, Save: arrows follow the visible order.
     h.step(&json!({"key": "ArrowLeft"})).unwrap();
     h.frames(2);
-    assert_eq!(h.app.docs.choice, Answer::Cancel);
+    assert_eq!(h.app.docs.choice, Answer::DontSave);
     h.step(&json!({"key": "ArrowRight"})).unwrap();
     h.frames(2);
     assert_eq!(h.app.docs.choice, Answer::Save);
     h.step(&json!({"key": "ArrowLeft"})).unwrap();
     h.step(&json!({"key": "ArrowLeft"})).unwrap();
     h.frames(2);
-    assert_eq!(h.app.docs.choice, Answer::DontSave);
+    assert_eq!(h.app.docs.choice, Answer::Cancel);
     h.step(&json!({"key": "ArrowRight"})).unwrap();
     h.frames(2);
-    assert_eq!(h.app.docs.choice, Answer::Cancel);
+    assert_eq!(h.app.docs.choice, Answer::DontSave);
+    h.step(&json!({"key": "ArrowLeft"})).unwrap();
     h.step(&json!({"key": "Enter"})).unwrap();
     h.frames(2);
     assert!(h.app.docs.closing.is_none(), "Enter gave the picked Cancel");

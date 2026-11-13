@@ -16,6 +16,10 @@ use crate::theme::Tokens;
 /// Apply transport actions from the current marker; endpoints stay bounded, including an
 /// empty design. All orientations reach the same rollback command.
 pub(crate) fn run_transport(app: &mut SolveApp, control: crate::ui_kit::HistoryTransport) {
+    if crate::documents::component_view_has_body(app) {
+        app.set_status(crate::i18n::tr("ui.part_view_feature_in_assembly"), true);
+        return;
+    }
     // A step moves from the marker the design has, not the one an open editor rolled to (#10688).
     if app.close_editor_for_history().is_err() {
         return;
@@ -279,6 +283,10 @@ fn slot_at(xs: &[f32], end: f32, x: f32) -> usize {
 /// Check what deleting `ids` takes with it or makes fail (off the window thread when that takes a
 /// while, #2678), then delete them or ask first.
 pub(crate) fn delete_features(app: &mut SolveApp, ids: Vec<u64>) {
+    if crate::documents::component_view_has_body(app) && ids.iter().any(|id| !crate::documents::component_view_feature_editable(app, *id)) {
+        app.set_status(crate::i18n::tr("ui.part_view_feature_in_assembly"), true);
+        return;
+    }
     let checks = ids.iter().map(|id| ("timeline.dependents".to_string(), json!({ "feature": id }))).collect();
     app.check_delete(checks, crate::deferred::AfterCheck::Timeline { features: ids, groups: Vec::new() });
 }
@@ -286,6 +294,10 @@ pub(crate) fn delete_features(app: &mut SolveApp, ids: Vec<u64>) {
 /// Delete timeline folders with their features (`contents`, nested folders' included) after the
 /// same check as [`delete_features`] (#7219).
 pub(crate) fn delete_folders(app: &mut SolveApp, groups: Vec<u64>, contents: Vec<u64>) {
+    if crate::documents::component_view_has_body(app) {
+        app.set_status(crate::i18n::tr("ui.part_view_feature_in_assembly"), true);
+        return;
+    }
     let checks = contents.iter().map(|id| ("timeline.dependents".to_string(), json!({ "feature": id }))).collect();
     app.check_delete(checks, crate::deferred::AfterCheck::Timeline { features: contents, groups });
 }
@@ -293,6 +305,12 @@ pub(crate) fn delete_folders(app: &mut SolveApp, groups: Vec<u64>, contents: Vec
 /// [`delete_features`] once each feature's `timeline.dependents` report is in; `groups` are
 /// timeline folders deleted with them.
 pub(crate) fn delete_checked_features(app: &mut SolveApp, ids: Vec<u64>, groups: Vec<u64>, reports: &[Value]) {
+    if crate::documents::component_view_has_body(app)
+        && (!groups.is_empty() || ids.iter().any(|id| !crate::documents::component_view_feature_editable(app, *id)))
+    {
+        app.set_status(crate::i18n::tr("ui.part_view_feature_in_assembly"), true);
+        return;
+    }
     // Each report is about one feature alone, so it names the others being deleted too: those
     // go anyway and are left out of the confirmation.
     let deleting: Vec<&str> = ids.iter().filter_map(|id| app.session.doc.feature(*id)).map(|f| f.name.as_str()).collect();
@@ -330,7 +348,8 @@ pub(crate) fn selected_feature_ids(app: &SolveApp) -> Vec<u64> {
         .features
         .iter()
         .filter(|feature| {
-            app.session.selection.iter().any(|selection| matches!(selection, solidcraft_engine::Sel::Feature { id } if *id == feature.id))
+            (!crate::documents::component_view_has_body(app) || crate::documents::component_view_feature(app, feature.id))
+                && app.session.selection.iter().any(|selection| matches!(selection, solidcraft_engine::Sel::Feature { id } if *id == feature.id))
         })
         .map(|feature| feature.id)
         .collect()
@@ -706,6 +725,56 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
 }
 
+/// A body-specific view must never roll back or reorder the surrounding assembly's history.
+/// Associated features remain visible; only a feature proven exclusive to the selected body
+/// can be opened for editing. The editor's result is still checked by the part scope guard.
+pub(crate) fn body_view_history(app: &mut SolveApp, ui: &mut egui::Ui, vertical: bool) {
+    let rows: Vec<(u64, String, bool)> = app
+        .session
+        .doc
+        .features
+        .iter()
+        .filter(|feature| crate::documents::component_view_feature(app, feature.id))
+        .map(|feature| (feature.id, feature.name.clone(), crate::documents::component_view_feature_editable(app, feature.id)))
+        .collect();
+    let t = Tokens::get();
+    let mut edit = None;
+    let draw = |ui: &mut egui::Ui, edit: &mut Option<u64>| {
+        ui.label(crate::i18n::tr("ui.history_title"));
+        for (id, name, editable) in &rows {
+            let text = egui::RichText::new(name).color(if *editable { t.text } else { t.text_dim });
+            let response = ui.add(egui::Label::new(text).sense(if *editable { Sense::click() } else { Sense::hover() }));
+            crate::scenario::publish_handle(&format!("timeline:{name}"), response.rect.center());
+            let response = response.on_hover_text(if *editable {
+                crate::i18n::tr_label("Edit Feature")
+            } else {
+                crate::i18n::tr("ui.part_view_feature_in_assembly")
+            });
+            if *editable && response.double_clicked() {
+                *edit = Some(*id);
+            }
+            if *editable {
+                crate::ui_kit::Menu::context(&response, |ui| {
+                    if crate::context_menu::button(ui, crate::i18n::tr_label("Edit Feature"), "edit").clicked() {
+                        *edit = Some(*id);
+                        ui.close();
+                    }
+                });
+            }
+        }
+    };
+    if vertical {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| draw(ui, &mut edit));
+    } else {
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+            ui.horizontal(|ui| draw(ui, &mut edit));
+        });
+    }
+    if let Some(id) = edit {
+        app.edit_feature(id);
+    }
+}
+
 pub(crate) fn floating_rect(available: Rect) -> Rect {
     Container::floating_card(Surface::Panel).bottom_strip_rect(available, 40.0)
 }
@@ -814,6 +883,10 @@ fn folder_tile(app: &mut SolveApp, ui: &mut egui::Ui, p: &egui::Painter, x: f32,
 }
 
 fn timeline_contents(app: &mut SolveApp, ui: &mut egui::Ui, floating: bool) {
+    if crate::documents::component_view_has_body(app) {
+        body_view_history(app, ui, false);
+        return;
+    }
     let t = Tokens::get();
     let accent = crate::theme::TabAccent::for_tab(&t, &app.ui.tab);
     let r = ui.max_rect();

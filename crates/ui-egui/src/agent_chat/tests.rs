@@ -639,8 +639,8 @@ fn permission_modes_decide_what_asks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The agent's own questions: SolidCraft's tools are allowed (its gate checks them), an earlier
-/// "Always allow" answers by itself, and both leave a note; anything else is asked.
+/// An agent-supplied tool title cannot bypass the user's approval. A prior explicit
+/// "Always allow" can still answer by itself and leaves a note.
 #[test]
 fn the_agents_own_questions_are_answered_by_the_mode_or_asked() {
     let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
@@ -653,7 +653,7 @@ fn the_agents_own_questions_are_answered_by_the_mode_or_asked() {
         ]
     };
     on_permission(&mut app, 1, "mcp__solidcraft-app__batch".into(), Some("other"), opts());
-    assert!(matches!(app.agent_chat.items.last(), Some(Item::Notice { text, .. }) if text.contains("mcp__solidcraft-app__batch")));
+    assert!(matches!(app.agent_chat.items.last(), Some(Item::Permission { answer: None, .. })));
     on_permission(&mut app, 2, "Run ls".into(), None, opts());
     assert!(matches!(app.agent_chat.items.last(), Some(Item::Permission { answer: None, .. })));
     let n = app.agent_chat.items.len() - 1;
@@ -686,7 +686,7 @@ fn a_title_that_mentions_solidcraft_goes_through_the_users_mode() {
         }
         // The chat's own tool stays a single question, the gate's.
         on_permission(&mut app, 2, "mcp__solidcraft-app__batch".into(), Some("other"), opts());
-        assert!(matches!(app.agent_chat.items.last(), Some(Item::Notice { .. })), "{mode:?}");
+        assert!(matches!(app.agent_chat.items.last(), Some(Item::Permission { answer: None, .. })), "{mode:?}");
         app.agent_chat.items.clear();
     }
     app.preferences.agent_permissions.insert("codex".into(), agents::Mode::All);
@@ -3216,6 +3216,7 @@ fn chips_and_a_long_message_wrap_inside_a_narrow_chat() {
 #[test]
 fn an_agents_markdown_is_drawn_as_blocks() {
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
     h.call("ui.agent_chat", json!({"open": true}));
     h.frames(3);
     h.app.agent_chat.items.push(Item::Agent {
@@ -3263,7 +3264,7 @@ fn an_attached_selection_goes_as_text_for_the_agent_and_as_chips_in_the_conversa
     app.agent_chat.attach_selection = true;
     send(&mut app, &ctx, "round this".into());
     let prompt = script.calls().pop().expect("a prompt");
-    assert!(prompt.starts_with("prompt: round this\n\n[Selected in SolidCraft"), "{prompt}");
+    assert!(prompt.starts_with(&format!("prompt: round this\n\n[Selected in {}", solidcraft_engine::product::PRODUCT.name)), "{prompt}");
     for want in ["Elements:", "- Flat face ", "planar", "area ", "- Edge ", "length ", "name ", "Features:", "feature id", "Bodies:", "- Body1"] {
         assert!(prompt.contains(want), "{want:?} missing from {prompt}");
     }
@@ -3332,6 +3333,7 @@ fn a_huge_selection_is_counted_not_dropped_silently() {
 #[test]
 fn the_selection_checkbox_and_the_chips_are_drawn() {
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
     h.call("ui.agent_chat", json!({"open": true}));
     h.frames(3);
     assert!(h.widget("Attach selection").is_some(), "the checkbox is there, with nothing selected");
@@ -3523,6 +3525,7 @@ fn assistant_click_and_shortcut_toggle_the_same_panel_without_a_connection() {
 #[test]
 fn a_long_message_keeps_the_buttons_in_the_window() {
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
     h.call("ui.resize", json!({"width": 1600.0, "height": 1000.0}));
     h.call("ui.agent_chat", json!({"open": true}));
     h.frames(8);
@@ -3565,6 +3568,7 @@ fn test_png(colour: [u8; 4], width: u32) -> Vec<u8> {
 #[test]
 fn a_messages_pictures_open_in_a_viewer() {
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
     h.call("ui.agent_chat", json!({"open": true}));
     h.app.agent_chat.items.push(Item::User {
         text: "waiting".into(),
@@ -3736,6 +3740,7 @@ fn pick_into_dialog(app: &mut SolveApp, sels: &[solidcraft_engine::Sel]) {
 #[test]
 fn the_picker_fills_a_tray_of_chips_that_can_be_trimmed() {
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
     h.call("ui.agent_chat", json!({"open": true}));
     let sels = box_selection(&mut h.app);
     h.frames(3);
@@ -3797,7 +3802,7 @@ fn the_picks_go_with_the_next_message_once() {
     app.agent_chat.attach_selection = true;
     send(&mut app, &ctx, "look at these".into());
     let prompt = script.calls().pop().expect("a prompt");
-    assert!(prompt.starts_with("prompt: look at these\n\n[Selected in SolidCraft"), "{prompt}");
+    assert!(prompt.starts_with(&format!("prompt: look at these\n\n[Selected in {}", solidcraft_engine::product::PRODUCT.name)), "{prompt}");
     assert!(prompt.contains("3 item(s)"), "two picked and one more selected: {prompt}");
     assert_eq!(prompt.matches("- Body1").count(), 1, "{prompt}");
     let Some(Item::User { context, .. }) = app.agent_chat.items.last() else { panic!("a sent message") };
@@ -4220,6 +4225,7 @@ fn unknown_or_malformed_tool_calls_keep_their_title_and_never_panic() {
 fn a_tool_card_shows_its_summary_and_keeps_the_json_behind_details() {
     use crate::scenario::handle_at;
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
     h.call("ui.agent_chat", json!({"open": true}));
     h.frames(3);
     let input = json!({"command": "solid.extrude", "params": {"sketch": "Sketch1", "distance": 10}});
@@ -4260,6 +4266,7 @@ fn a_tool_card_shows_its_summary_and_keeps_the_json_behind_details() {
 fn a_screenshot_card_hides_the_path_until_details() {
     use crate::scenario::handle_at;
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
     h.call("ui.agent_chat", json!({"open": true}));
     h.frames(3);
     let path = r"C:\Users\bherbruck\AppData\Local\Temp\solidcraft-mcp-8608-b4c7b64\shot-0.png";

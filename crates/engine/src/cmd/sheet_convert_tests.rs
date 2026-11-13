@@ -69,10 +69,107 @@ fn deduction(theta: f64, r: f64, t: f64, k: f64) -> f64 {
 
 const BOTTOM_EDGES: [[f64; 3]; 4] = [[50.0, 0.0, 0.0], [100.0, 30.0, 0.0], [50.0, 60.0, 0.0], [0.0, 30.0, 0.0]];
 
+/// Optional externally supplied assembly: exercise suggestions on its placed part, not a
+/// separately simplified body. No customer model is committed to the test suite.
+#[test]
+#[ignore = "requires the private customer STEP fixture and SOLIDCRAFT_SHEET_* settings"]
+fn customer_assembly_sheet_suggestions_reach_a_valid_conversion() {
+    let source = std::env::var("SOLIDCRAFT_SHEET_ASSEMBLY").expect("set SOLIDCRAFT_SHEET_ASSEMBLY to the customer STEP fixture");
+    let name = std::env::var("SOLIDCRAFT_SHEET_BODY").unwrap();
+    let face: Vec<f64> = std::env::var("SOLIDCRAFT_SHEET_FACE").unwrap().split(',').map(|v| v.parse().unwrap()).collect();
+    assert_eq!(face.len(), 3);
+    let mut session = Session::default();
+    run(&mut session, "doc.open", json!({"path":source}));
+    if let Ok(component) = std::env::var("SOLIDCRAFT_SHEET_COMPONENT") {
+        run(&mut session, "component.activate", json!({"component":component}));
+    }
+    let state = session.world_state();
+    let body = state.body(&name).unwrap();
+    let mesh = body.mesh();
+    eprintln!(
+        "sheet fixture: faces={} edges={} triangles={}",
+        mesh.tri_face.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        mesh.edges.len(),
+        mesh.triangles.len()
+    );
+    let started = std::time::Instant::now();
+    let suggestions = solidcraft_doc::sheet::suggest_bend_edges(body, solidcraft_geom::Vec3::new(face[0], face[1], face[2]));
+    eprintln!("suggested {} bends in {:?}", suggestions.len(), started.elapsed());
+    let expected_bends: usize = std::env::var("SOLIDCRAFT_SHEET_BENDS").unwrap().parse().unwrap();
+    assert_eq!(suggestions.len(), expected_bends, "the placed sheet must retain all of its bends");
+    let bends: Vec<_> = suggestions.iter().map(|(_, p)| [p.x, p.y, p.z]).collect();
+    let measured = solidcraft_doc::sheet::infer_bend_profile(
+        body,
+        solidcraft_geom::Vec3::new(face[0], face[1], face[2]),
+        &suggestions.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+    );
+    drop(state);
+    let thickness: f64 = std::env::var("SOLIDCRAFT_SHEET_THICKNESS").unwrap().parse().unwrap();
+    let radius: f64 = std::env::var("SOLIDCRAFT_SHEET_RADIUS").unwrap().parse().unwrap();
+    let (found_thickness, found_radius) = measured.expect("the two skins of every bend must agree");
+    assert!((found_thickness - thickness).abs() < 1e-5 && (found_radius - radius).abs() < 1e-5);
+    rule(&mut session, "Fixture", thickness, 0.5, radius, 0.0);
+    run(&mut session, "sheet.convert", json!({"body":name,"face":face,"bends":bends}));
+    let feature = session.model.results.last().unwrap();
+    assert!(feature.error.is_none(), "{:?}", feature.error);
+    let result = run(&mut session, "sheet.flat_pattern", json!({"body":name}));
+    assert!((result["thickness"].as_f64().unwrap() - thickness).abs() < 1e-5);
+    let actual_bends = result["bends"].as_array().unwrap();
+    assert_eq!(actual_bends.len(), expected_bends);
+    assert!(actual_bends.iter().all(|bend| (bend["radius"].as_f64().unwrap() - radius).abs() < 1e-5));
+    let expected: Vec<f64> = std::env::var("SOLIDCRAFT_SHEET_SIZE").unwrap().split(',').map(|v| v.parse().unwrap()).collect();
+    assert_eq!(expected.len(), 2);
+    let mut actual = [result["flat_size_mm"][0].as_f64().unwrap(), result["flat_size_mm"][1].as_f64().unwrap()];
+    actual.sort_by(f64::total_cmp);
+    let mut expected = [expected[0], expected[1]];
+    expected.sort_by(f64::total_cmp);
+    assert!((actual[0] - expected[0]).abs() < 0.001 && (actual[1] - expected[1]).abs() < 0.001, "{actual:?} != {expected:?}");
+}
+
 /// A 100 x 60 x 30 box shelled to `t` with its top open.
 fn tray(s: &mut Session, t: f64) {
     run(s, "solid.box", json!({"length": 100, "width": 60, "height": 30, "body_name": "Tray"}));
     run(s, "solid.shell", json!({"faces": [[50, 30, 30]], "thickness": t}));
+}
+
+#[test]
+fn automatic_bend_suggestions_find_cylindrical_bends_without_suggesting_a_box() {
+    let mut box_design = Session::default();
+    run(&mut box_design, "solid.box", json!({"length":100,"width":60,"height":30,"body_name":"Block"}));
+    let state = box_design.model.state();
+    assert!(solidcraft_doc::sheet::suggest_bend_edges(state.body("Block").unwrap(), solidcraft_geom::Vec3::new(50.0, 30.0, 0.0)).is_empty());
+
+    let mut formed = Session::default();
+    rule(&mut formed, "Test", 2.0, 0.44, 2.0, 0.5);
+    run(&mut formed, "sketch.create", json!({"plane":"XY","name":"Base"}));
+    run(&mut formed, "sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[100,60]}));
+    run(&mut formed, "sketch.finish", json!({}));
+    run(&mut formed, "sheet.flange", json!({"sketch":"Base"}));
+    run(&mut formed, "sheet.flange", json!({"edges":[[50,0,2],[100,30,2],[50,60,2],[0,30,2]],"height":30}));
+    let path = std::env::temp_dir().join(format!("solidcraft-auto-bends-{}.step", std::process::id()));
+    run(&mut formed, "file.export", json!({"path":path,"format":"step"}));
+    let mut imported = Session::default();
+    run(&mut imported, "doc.open", json!({"path":path}));
+    let state = imported.model.state();
+    let body = state.bodies.first().unwrap();
+    let name = body.name.clone();
+    let suggestions = solidcraft_doc::sheet::suggest_bend_edges(body, solidcraft_geom::Vec3::new(50.0, 30.0, 0.0));
+    assert_eq!(suggestions.len(), 4, "{suggestions:?}");
+    let points: Vec<_> = suggestions.iter().map(|(_, point)| *point).collect();
+    let profile = solidcraft_doc::sheet::infer_bend_profile(body, solidcraft_geom::Vec3::new(50.0, 30.0, 0.0), &points)
+        .expect("formed sheet has matching cylindrical skins");
+    assert!((profile.0 - 2.0).abs() < 1e-5 && (profile.1 - 2.0).abs() < 1e-5);
+    assert!(solidcraft_doc::sheet::infer_bend_profile(body, solidcraft_geom::Vec3::new(50.0, 30.0, 0.0), &[]).is_none());
+    assert!(
+        solidcraft_doc::sheet::infer_bend_profile(body, solidcraft_geom::Vec3::new(50.0, 30.0, 0.0), &[solidcraft_geom::Vec3::new(50.0, 30.0, 0.0)])
+            .is_none()
+    );
+    let bends: Vec<_> = suggestions.iter().map(|(_, p)| [p.x, p.y, p.z]).collect();
+    drop(state);
+    rule(&mut imported, "Test", 2.0, 0.44, 2.0, 0.5);
+    run(&mut imported, "sheet.convert", json!({"body":name,"face":[50,30,0],"bends":bends}));
+    assert_eq!(flat(&mut imported)["bends"].as_array().unwrap().len(), 4);
+    let _ = std::fs::remove_file(path);
 }
 
 /// The folded tray's volume: base, four 90° bends and four walls cut back at the corners.

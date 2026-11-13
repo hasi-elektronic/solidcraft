@@ -21,6 +21,18 @@ pub(crate) enum Ref<S, F, N, B> {
 }
 
 impl FeatureKind {
+    /// Feature dependencies keyed by stable feature id and, for older references, by name.
+    pub fn input_feature_refs(&self) -> (Vec<u64>, Vec<String>) {
+        let mut ids = Vec::new();
+        let mut names = Vec::new();
+        self.walk_refs(&mut |r| match r {
+            Ref::Feature(id) => ids.push(id.0),
+            Ref::FeatureName(name) => names.push(name.as_ref().to_string()),
+            _ => {}
+        });
+        (ids, names)
+    }
+
     /// Sketches the feature is built from (profiles, paths, points): deleting one of them
     /// deletes the feature.
     pub fn input_sketches(&self) -> Vec<u64> {

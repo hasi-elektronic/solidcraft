@@ -820,6 +820,9 @@ fn mesh_object(b: &solidcraft_doc::ModelBody, tagged: bool, quality: MeshQuality
     Ok(MeshObject { name: b.name.clone(), positions, triangles, color: b.body.color(), transparency, looks, tri_looks, tri_faces, faces })
 }
 
+/// Stable prefix for invalid assembly errors displayed by the desktop UI.
+pub const STEP_ASSEMBLY_INVALID_PREFIX: &str = "invalid STEP assembly";
+
 /// STEP assembly of a design with components: a product per component holding its bodies in
 /// the component's own frame (`local` is the model before placing occurrences), and an
 /// assembly occurrence per component occurrence. A body with an offset (an imported assembly's
@@ -831,7 +834,9 @@ pub fn step_assembly(doc: &Document, local: &ModelState, name: &str) -> Result<V
     index.insert(0, 0);
     let mut products = vec![ExportProduct { name: doc.name.clone(), bodies: Vec::new(), children: Vec::new() }];
     for c in &doc.components {
-        index.insert(c.id, products.len());
+        if index.insert(c.id, products.len()).is_some() {
+            return Err(IoError::Invalid(format!("{STEP_ASSEMBLY_INVALID_PREFIX}: duplicate component reference")));
+        }
         products.push(ExportProduct { name: c.name.clone(), bodies: Vec::new(), children: Vec::new() });
     }
     let framed: Vec<Option<solidcraft_kernel::Body>> = local
@@ -844,14 +849,37 @@ pub fn step_assembly(doc: &Document, local: &ModelState, name: &str) -> Result<V
         .collect::<std::result::Result<_, _>>()?;
     for (b, framed) in local.bodies.iter().zip(&framed) {
         let comp = doc.model_body_component(b);
-        let Some(p) = index.get(&comp).and_then(|i| products.get_mut(*i)) else { continue };
+        let Some(p) = index.get(&comp).and_then(|i| products.get_mut(*i)) else {
+            return Err(IoError::Invalid(format!("{STEP_ASSEMBLY_INVALID_PREFIX}: body references a missing component")));
+        };
         p.bodies.push(ExportBody { name: b.name.clone(), body: framed.as_ref().unwrap_or(&b.body), color: b.body.color() });
     }
+    let mut occurrence_ids = std::collections::HashSet::new();
     for o in &doc.occurrences {
-        let (Some(&parent), Some(&child)) = (index.get(&o.parent), index.get(&o.component)) else { continue };
+        if !occurrence_ids.insert(o.id) {
+            return Err(IoError::Invalid(format!("{STEP_ASSEMBLY_INVALID_PREFIX}: duplicate occurrence reference")));
+        }
+        let (Some(&parent), Some(&child)) = (index.get(&o.parent), index.get(&o.component)) else {
+            return Err(IoError::Invalid(format!("{STEP_ASSEMBLY_INVALID_PREFIX}: occurrence references a missing component")));
+        };
         if let Some(p) = products.get_mut(parent) {
             p.children.push((child, o.transform, o.name.clone()));
         }
+    }
+    let mut reachable = vec![false; products.len()];
+    let mut pending = vec![0usize];
+    while let Some(id) = pending.pop() {
+        if let Some(seen) = reachable.get_mut(id)
+            && !*seen
+        {
+            *seen = true;
+            if let Some(product) = products.get(id) {
+                pending.extend(product.children.iter().map(|(child, _, _)| *child));
+            }
+        }
+    }
+    if products.iter().enumerate().any(|(id, product)| !product.bodies.is_empty() && !reachable.get(id).copied().unwrap_or(false)) {
+        return Err(IoError::Invalid(format!("{STEP_ASSEMBLY_INVALID_PREFIX}: bodies without a reachable occurrence")));
     }
     Ok(solidcraft_kernel::step_export_products(&products, 0, &step_header(format!("{name}.step"), &doc.metadata))?.into_bytes())
 }
@@ -969,6 +997,65 @@ mod tests {
         let mut m = Model::new();
         m.evaluate(&doc);
         (doc, m)
+    }
+
+    #[test]
+    fn step_assembly_rejects_missing_references_and_unreachable_bodies() {
+        let (mut doc, model) = model();
+        let state = model.state();
+        let body_name = state.bodies[0].name.clone();
+        doc.components.push(solidcraft_doc::Component { id: 7, name: "Part".into(), ..Default::default() });
+        doc.body_components.insert(body_name.clone(), 7);
+        assert!(step_assembly(&doc, &state, "orphan").is_err());
+        let mut mixed = (*state).clone();
+        let mut root_body = mixed.bodies[0].clone();
+        root_body.name = "RootBody".into();
+        mixed.bodies.push(root_body);
+        assert!(step_assembly(&doc, &mixed, "root-and-orphan").is_err());
+        doc.body_components.insert(body_name, 999);
+        assert!(step_assembly(&doc, &state, "missing-owner").is_err());
+        doc.body_components.clear();
+        for (parent, component) in [(999, 7), (0, 999)] {
+            doc.occurrences = vec![solidcraft_doc::Occurrence {
+                id: 10,
+                component,
+                parent,
+                name: "bad".into(),
+                transform: solidcraft_doc::IDENTITY,
+                grounded: false,
+            }];
+            assert!(step_assembly(&doc, &state, "missing-reference").is_err());
+        }
+        doc.occurrences.clear();
+        doc.components.push(solidcraft_doc::Component { id: 7, name: "Duplicate".into(), ..Default::default() });
+        assert!(step_assembly(&doc, &state, "duplicate-component").is_err());
+        let _ = doc.components.pop();
+        let occurrence =
+            solidcraft_doc::Occurrence { id: 10, component: 7, parent: 0, name: "part".into(), transform: solidcraft_doc::IDENTITY, grounded: false };
+        doc.occurrences = vec![occurrence.clone(), occurrence];
+        assert!(step_assembly(&doc, &state, "duplicate-occurrence").is_err());
+    }
+
+    #[test]
+    fn step_assembly_keeps_nested_and_repeated_occurrences() {
+        let (mut doc, model) = model();
+        let state = model.state();
+        doc.components.push(solidcraft_doc::Component { id: 7, name: "Assembly".into(), ..Default::default() });
+        doc.components.push(solidcraft_doc::Component { id: 8, name: "Part".into(), ..Default::default() });
+        doc.body_components.insert(state.bodies[0].name.clone(), 8);
+        doc.occurrences = [(10, 0, 7), (11, 7, 8), (12, 7, 8)]
+            .into_iter()
+            .map(|(id, parent, component)| solidcraft_doc::Occurrence {
+                id,
+                component,
+                parent,
+                name: format!("occ-{id}"),
+                transform: solidcraft_doc::IDENTITY,
+                grounded: false,
+            })
+            .collect();
+        let step = String::from_utf8(step_assembly(&doc, &state, "nested").unwrap()).unwrap();
+        assert_eq!(step.matches("NEXT_ASSEMBLY_USAGE_OCCURRENCE").count(), 3);
     }
 
     /// A binary STL of a cube's triangles.

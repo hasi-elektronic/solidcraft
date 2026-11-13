@@ -67,6 +67,9 @@ fn sheet_rule_editor_contract() {
     frame(&mut app, &ctx, &mut kind, SHEET_ROWS);
     let mut expected = json!({"name":"Steel (mm)","active":true,"corner_relief_shape":"notch","thickness":"2.5 mm","k_factor":"0.44",
         "bend_radius":"Thickness","relief_width":"Thickness","relief_depth":"Thickness * 0.5","corner_relief":"Thickness * 4.0","hem_gap":"0.01 mm","gap":"Thickness","angle_display":"bend"});
+    if solidcraft_engine::product::PRODUCT.branded {
+        expected["thickness"] = json!("2 mm");
+    }
     assert_eq!(commands(&app, &kind), vec![("sheet.manage_rules".into(), expected.clone())]);
     let Kind::Sheet(Sm::Rules { pick, values, relief, .. }) = &mut kind else { panic!() };
     *pick = 1;
@@ -93,8 +96,27 @@ fn sheet_rule_editor_contract() {
     let Kind::Sheet(Sm::Rules { pick, .. }) = &mut kind else { panic!() };
     *pick = 0;
     frame(&mut app, &ctx, &mut kind, SHEET_ROWS);
-    assert_eq!(commands(&app, &kind)[0].1["thickness"], "2.5 mm");
+    assert_eq!(commands(&app, &kind)[0].1["thickness"], if solidcraft_engine::product::PRODUCT.branded { "2 mm" } else { "2.5 mm" });
     assert_eq!(commands(&app, &kind)[0].1["active"], true);
+}
+
+#[cfg(any(feature = "brand-hasisolid", feature = "brand-mssolid"))]
+#[test]
+fn branded_sheet_thickness_can_be_changed_in_the_rule_dialog() {
+    let mut h = scenario::Harness::new();
+    h.app.home.open = false;
+    h.app.preferences.language = "en".into();
+    h.frames(4);
+    h.step(&json!({"click":{"handle":"tab:SHEET METAL"}})).unwrap();
+    h.step(&json!({"click":{"handle":"button:sheet.manage_rules"}})).unwrap();
+    h.frames(4);
+    assert_eq!(h.app.session.doc.sheet_rule(None).thickness, "2 mm");
+    h.step(&json!({"click":{"handle":"dialog:Thickness"}})).unwrap();
+    h.step(&json!({"key":"A","cmd":true})).unwrap();
+    h.step(&json!({"text":"3 mm"})).unwrap();
+    h.step(&json!({"click":{"handle":"dialog:ok"}})).unwrap();
+    h.frames(4);
+    assert_eq!(h.app.session.doc.sheet_rule(None).thickness, "3 mm");
 }
 
 #[test]
@@ -145,6 +167,7 @@ fn plastic_rule_editor_contract() {
 fn sheet_rule_editor_delete_reloads_and_plastic_has_no_delete() {
     for layout in [crate::shell::LayoutMode::Docked, crate::shell::LayoutMode::Floating] {
         let mut h = scenario::Harness::new();
+        h.app.preferences.language = "en".into();
         h.app.home.open = false;
         h.call("ui.set", json!({"layout":layout}));
         h.app.session.execute("sheet.manage_rules", &json!({"name":"Custom","thickness":"3 mm","active":true})).unwrap();
@@ -154,8 +177,14 @@ fn sheet_rule_editor_delete_reloads_and_plastic_has_no_delete() {
         assert_eq!(crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap()[0].1["name"], "Custom");
         h.step(&json!({"widget":"Delete rule"})).unwrap();
         h.frames(4);
-        assert!(h.app.session.doc.sheet.rules.is_empty());
-        assert!(h.widget("Delete rule").is_none());
+        if solidcraft_engine::product::PRODUCT.branded {
+            assert_eq!(h.app.session.doc.sheet.rules.len(), 1);
+            assert_eq!(h.app.session.doc.sheet.rules[0].thickness, "2 mm");
+            assert!(h.widget("Delete rule").is_none());
+        } else {
+            assert!(h.app.session.doc.sheet.rules.is_empty());
+            assert!(h.widget("Delete rule").is_none());
+        }
         assert_eq!(crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap()[0].1["name"], "Steel (mm)");
         h.app.dialog = None;
         h.app.start("plastic.manage_rules");

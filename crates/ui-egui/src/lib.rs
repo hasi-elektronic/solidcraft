@@ -26,6 +26,10 @@ mod colour_tokens_tests;
 #[cfg(test)]
 mod colour_vision_tests;
 pub mod command_help;
+#[cfg(not(target_arch = "wasm32"))]
+mod companion;
+#[cfg(windows)]
+mod companion_publish;
 pub mod context_menu;
 pub mod control;
 pub mod control_job;
@@ -402,7 +406,7 @@ impl Default for UiState {
     fn default() -> Self {
         UiState {
             layout: Default::default(),
-            tab: "MODEL".into(),
+            tab: if solidcraft_engine::product::PRODUCT.branded { "SHEET METAL" } else { "MODEL" }.into(),
             ribbon_context: None,
             sketch_return_tab: None,
             show_browser: true,
@@ -437,12 +441,16 @@ pub struct Services {
     /// the picker's first filter (`&[]`: designs, CAD files and meshes, #1801).
     pub pick_open: Option<Box<dyn Fn(&[&str]) -> FilePickerFuture>>,
     pub pick_save: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
+    pub pick_viewer_save: Option<Box<dyn Fn(&str, &str) -> FilePickerFuture>>,
     /// Open a dialog for one file of a kind (its name, its extensions): on macOS a dialog allows
     /// only the types it names, so the agent chat's files need a dialog of their own. `None`: the
     /// Open dialog.
     pub pick_file: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
     /// Open a dialog asking for a program (a slicer); `None` when the host has no such dialog.
     pub pick_program: Option<Box<dyn Fn() -> FilePickerFuture>>,
+    /// Locate and launch this brand's separately installed 3D viewer.
+    pub find_viewer: Option<Box<dyn Fn() -> Option<String>>>,
+    pub launch_viewer: Option<Box<dyn Fn(&str, &str) -> Result<(), String>>>,
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
     /// Where the host reads the anti-aliasing preference at start (a small JSON file).
     pub graphics_path: Option<String>,
@@ -535,6 +543,8 @@ pub struct SolveApp {
     pub pre_sketch_component: Option<PreSketchComponent>,
     pub services: Services,
     file_picker: Option<file_picker::Pending>,
+    #[cfg(not(target_arch = "wasm32"))]
+    companion_job: Option<companion::Job>,
     /// A slicer started alone and waited for before the file is sent (Send to Slicer).
     pub(crate) slicer_wait: Option<dialogs_save_mesh::SlicerWait>,
     /// Open with EasyPrint: the upload in flight and the question before the first one.
@@ -796,6 +806,8 @@ impl SolveApp {
             pre_sketch_component: None,
             services,
             file_picker: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            companion_job: None,
             slicer_wait: None,
             easyprint: Default::default(),
             saving: None,
@@ -1158,6 +1170,7 @@ impl SolveApp {
         if self.file_load.busy() || self.file_picker.is_some() || self.saving.is_some() {
             return Err("a file operation is in progress".into());
         }
+        documents::sync_component_view_scope(self);
         // The editor's own marker moves come through here, so only Undo, Redo and Play close it.
         if matches!(id, "edit.undo" | "edit.redo" | "timeline.play") {
             self.close_editor_for_history()?;
@@ -1215,6 +1228,7 @@ impl SolveApp {
                 render_workspace::light::edited(self, &params, v);
             }
         }
+        documents::sync_component_view_scope(self);
         done
     }
 
@@ -2078,7 +2092,7 @@ impl SolveApp {
             return;
         }
         let Some(idx) = self.session.doc.feature_index(id) else { return };
-        let marker = self.finish_sketch_for_edit();
+        let Ok(marker) = self.finish_sketch_for_edit() else { return };
         self.tool = None;
         if self.session.doc.marker != marker {
             self.prepare_feature_edit(id, idx, marker);
@@ -2159,7 +2173,7 @@ impl SolveApp {
         if self.session.doc.feature_index(id).is_none() {
             return;
         }
-        let marker = self.finish_sketch_for_edit();
+        let Ok(marker) = self.finish_sketch_for_edit() else { return };
         let before = self.settled_cam();
         let context = (self.session.active_component, self.session.active_occurrence_path.clone());
         self.tool = None;
@@ -2232,7 +2246,7 @@ impl SolveApp {
 
     /// Pass the original marker to the next editor. Restoring it between editors could finish
     /// in the background after the next rollback, moving the marker out from under that edit.
-    fn finish_sketch_for_edit(&mut self) -> Option<usize> {
+    fn finish_sketch_for_edit(&mut self) -> Result<Option<usize>, String> {
         let marker = self
             .pending_feature_edit
             .take()
@@ -2241,9 +2255,10 @@ impl SolveApp {
         if self.session.active_sketch.is_some() {
             let command = self.take_sketch_exit().unwrap_or_else(|| "sketch.finish".into());
             self.prepare_sketch_exit();
-            let _ = self.run(&command, json!({"restore_marker": false}));
+            let restore = documents::component_view_has_body(self);
+            self.run(&command, json!({"restore_marker": restore}))?;
         }
-        marker
+        Ok(marker)
     }
 
     /// Finish the active sketch: stop editing and restore the history marker Edit Sketch moved.
@@ -2299,6 +2314,9 @@ impl SolveApp {
     /// Visibility in the editor's scene: hidden face-profile sources are temporarily shown
     /// without changing the session's visibility or either history stack.
     pub(crate) fn body_visible(&self, name: &str) -> bool {
+        if documents::component_view_body(self, name) == Some(false) {
+            return false;
+        }
         self.session.body_visible(name) || self.dialog.as_ref().is_some_and(|d| d.edit_source_bodies.iter().any(|source| source == name))
     }
 
@@ -2316,6 +2334,9 @@ impl SolveApp {
     /// Is the browser's Origin folder shown? The design keeps it once it is toggled; until then
     /// the Hide Origin by Default preference decides.
     pub fn origin_shown(&self) -> bool {
+        if documents::component_view_active(self) {
+            return false;
+        }
         !self.session.visibility.origin_hidden.unwrap_or(self.preferences.hide_origin)
     }
 
@@ -2785,6 +2806,8 @@ impl SolveApp {
         frame_watch::begin(self);
         gpu::tick_tessellation(self);
         file_picker::tick(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        companion::tick(self, ctx);
         dialogs_save_mesh::tick_wait(self, ctx);
         easyprint_ui::tick(self, ctx);
         render_workspace::sync_backend(self);

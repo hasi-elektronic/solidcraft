@@ -128,7 +128,11 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 /// This build's version: the release workflow's `SOLIDCRAFT_VERSION` (with any nightly suffix)
 /// when it built this binary, else the crate version.
 pub fn current_version() -> &'static str {
-    option_env!("SOLIDCRAFT_VERSION").filter(|v| !v.is_empty()).unwrap_or(env!("CARGO_PKG_VERSION"))
+    if solidcraft_engine::product::PRODUCT.branded {
+        solidcraft_engine::product::PRODUCT.version
+    } else {
+        option_env!("SOLIDCRAFT_VERSION").filter(|v| !v.is_empty()).unwrap_or(env!("CARGO_PKG_VERSION"))
+    }
 }
 
 /// The release workflow built this binary (`SOLIDCRAFT_VERSION` is set there). Anything else is a
@@ -691,12 +695,17 @@ pub fn offered(app: &SolveApp) -> Option<&Release> {
 
 /// Checks may run here: a release build with the host's HTTP client, or a test feed.
 pub fn available(app: &mut SolveApp) -> bool {
-    !app.updater.off && (app.updater.feed.is_some() || (app.services.http_get.is_some() && app.updater.kind().checks()))
+    !solidcraft_engine::product::PRODUCT.branded
+        && !app.updater.off
+        && (app.updater.feed.is_some() || (app.services.http_get.is_some() && app.updater.kind().checks()))
 }
 
 /// Per frame: the first frame of each launch starts an automatic check, the open app checks
 /// again once a day (an hour after a failure), and a finished check is collected.
 pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
+    if solidcraft_engine::product::PRODUCT.branded {
+        return;
+    }
     poll_install(app);
     // Quitting to restart or install was cancelled (a "save changes?" answered Cancel).
     if app.updater.launch.is_some() && app.docs.quitting.is_none() && !app.quit_requested {
@@ -832,6 +841,9 @@ fn poll(app: &mut SolveApp) {
 
 /// How this installation updates in place, when the host can download (None: Download only).
 pub fn install_method(app: &mut SolveApp) -> Option<install::Method> {
+    if solidcraft_engine::product::PRODUCT.branded {
+        return None;
+    }
     // A launcher updates its copies itself: no Update now, no replacing the AppImage under it.
     if app.updater.managed_by().is_some() {
         return None;
@@ -1164,6 +1176,8 @@ pub fn prefs_rows(app: &mut SolveApp, ui: &mut egui::Ui) {
     let kind = app.updater.kind().clone();
     let note = if kind == InstallKind::Web {
         crate::i18n::tr("update.prefs_web").to_string()
+    } else if let Some(note) = branded_update_note() {
+        note
     } else if can && let Some(manager) = app.updater.managed_by().map(str::to_string) {
         crate::i18n::format("update.prefs_managed", &[("version", current_version()), ("manager", &manager)])
     } else if can {
@@ -1214,6 +1228,10 @@ pub fn prefs_rows(app: &mut SolveApp, ui: &mut egui::Ui) {
     {
         app.updater.open = true;
     }
+}
+
+fn branded_update_note() -> Option<String> {
+    solidcraft_engine::product::PRODUCT.branded.then(|| crate::i18n::format("update.prefs_product_packages", &[("version", current_version())]))
 }
 
 /// The newer version found, if any (offered or skipped).

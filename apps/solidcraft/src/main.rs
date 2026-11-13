@@ -21,6 +21,7 @@
 #[path = "../../../assets/icons/app/shared/source/app_icon.rs"]
 mod app_icon;
 mod come_forward;
+mod companion;
 mod control_server;
 #[cfg(target_os = "linux")]
 mod desktop_theme;
@@ -472,6 +473,8 @@ fn services(cc: &eframe::CreationContext<'_>, folder: &DialogFolder) -> Services
     let open_parent = parent.clone();
     let program_parent = parent.clone();
     let file_parent = parent.clone();
+    let viewer_parent = parent.clone();
+    let viewer_folder = folder.clone();
     let (open_folder, file_folder, save_folder) = (folder.clone(), folder.clone(), folder.clone());
     Services {
         pick_open: Some(Box::new(move |first: &[&str]| {
@@ -514,6 +517,14 @@ fn services(cc: &eframe::CreationContext<'_>, folder: &DialogFolder) -> Services
             let dialog = if cfg!(target_os = "windows") { dialog.add_filter("Programs", &["exe"]) } else { dialog };
             let future = dialog.pick_file();
             Box::pin(async move { future.await.map(|p| p.path().to_string_lossy().into_owned()) })
+        })),
+        find_viewer: if cfg!(windows) && solidcraft_engine::product::PRODUCT.branded { Some(Box::new(companion::find)) } else { None },
+        launch_viewer: if cfg!(windows) && solidcraft_engine::product::PRODUCT.branded { Some(Box::new(companion::launch)) } else { None },
+        pick_viewer_save: Some(Box::new(move |title: &str, name: &str| {
+            let future =
+                viewer_folder.start(viewer_parent.clone()).set_title(title).set_file_name(name).add_filter("STEP", &["step", "stp"]).save_file();
+            let folder = viewer_folder.clone();
+            Box::pin(async move { folder.answer(future.await) })
         })),
         pick_save: Some(Box::new(move |name: &str, exts: &[&str]| {
             let dialog = save_folder.start(parent.clone()).set_file_name(name);
@@ -666,7 +677,7 @@ struct Keychain;
 
 impl Keychain {
     fn entry(id: &str) -> Result<keyring::Entry, String> {
-        keyring::Entry::new("SolidCraft agent chat", id).map_err(|e| e.to_string())
+        keyring::Entry::new(solidcraft_engine::product::PRODUCT.credential_service, id).map_err(|e| e.to_string())
     }
 }
 
@@ -728,8 +739,10 @@ fn http_call(url: &str, timeout: std::time::Duration) -> Result<ureq::http::Resp
 
 /// The per-user settings folder: eframe's storage (`app.ron`) and the anti-aliasing preference.
 fn settings_dir() -> Result<Option<std::path::PathBuf>, String> {
-    let selected = std::env::var_os("SOLIDCRAFT_SETTINGS_DIR");
-    startup::settings_directory(selected.as_deref(), eframe::storage_dir("SolidCraft"))
+    let product = solidcraft_engine::product::PRODUCT;
+    let key = format!("{}_SETTINGS_DIR", product.name.to_ascii_uppercase());
+    let selected = std::env::var_os(key);
+    startup::settings_directory(selected.as_deref(), eframe::storage_dir(product.name))
 }
 
 /// The anti-aliasing preference, kept next to eframe's storage (it is needed before the
@@ -851,10 +864,24 @@ fn app_viewport(custom_titlebar: bool) -> Result<egui::ViewportBuilder, eframe::
     #[cfg(target_os = "macos")]
     let icon = egui::IconData::default();
     #[cfg(not(target_os = "macos"))]
-    let icon =
-        egui::IconData { rgba: app_icon::rgba(64).map_err(|e| eframe::Error::AppCreation(std::io::Error::other(e).into()))?, width: 64, height: 64 };
+    let icon = {
+        #[cfg(feature = "brand-hasisolid")]
+        let brand_png: Option<&[u8]> = Some(include_bytes!("../../../assets/brands/hasisolid/app.png"));
+        #[cfg(all(feature = "brand-mssolid", not(feature = "brand-hasisolid")))]
+        let brand_png: Option<&[u8]> = Some(include_bytes!("../../../assets/brands/mssolid/app.png"));
+        #[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
+        let brand_png: Option<&[u8]> = None;
+        match brand_png {
+            Some(bytes) => eframe::icon_data::from_png_bytes(bytes).map_err(|e| eframe::Error::AppCreation(Box::new(e)))?,
+            None => egui::IconData {
+                rgba: app_icon::rgba(64).map_err(|e| eframe::Error::AppCreation(std::io::Error::other(e).into()))?,
+                width: 64,
+                height: 64,
+            },
+        }
+    };
     Ok(egui::ViewportBuilder::default()
-        .with_title("SolidCraft")
+        .with_title(solidcraft_engine::product::PRODUCT.name)
         .with_icon(icon)
         .with_inner_size([1600.0, 1000.0])
         .with_min_inner_size([960.0, 600.0])
@@ -867,7 +894,7 @@ fn app_viewport(custom_titlebar: bool) -> Result<egui::ViewportBuilder, eframe::
 }
 
 /// The window's app id: it names the desktop entry, so it is the packages' reverse-DNS id.
-const APP_ID: &str = solidcraft_engine::io::APP_ID;
+const APP_ID: &str = solidcraft_engine::product::PRODUCT.app_id;
 
 /// Disconnects from the 3D mouse driver when dropped, as `main` returns or a panic unwinds out
 /// of it (`solidcraft_3dx_client::stop`).
@@ -897,11 +924,16 @@ fn main() -> eframe::Result {
     }
     // Validate before legacy adoption, crash markers or any user preference read.
     let settings = settings_dir().map_err(|error| eframe::Error::AppCreation(error.into()))?;
-    if std::env::var_os("SOLIDCRAFT_SETTINGS_DIR").is_none() {
+    if !solidcraft_engine::product::PRODUCT.branded && std::env::var_os("SOLIDCRAFT_SETTINGS_DIR").is_none() {
         adopt_legacy_settings();
     }
     let mut safe_mode = startup::env_on(std::env::var(startup::SAFE_MODE_ENV).ok().as_deref());
-    let mut control_port: Option<u16> = solidcraft_engine::geom::env::var("CONTROL_PORT").and_then(|p| p.parse().ok());
+    let control_env = if solidcraft_engine::product::PRODUCT.branded {
+        std::env::var(format!("{}_CONTROL_PORT", solidcraft_engine::product::PRODUCT.name.to_ascii_uppercase())).ok()
+    } else {
+        solidcraft_engine::geom::env::var("CONTROL_PORT")
+    };
+    let mut control_port: Option<u16> = control_env.and_then(|p| p.parse().ok());
     let mut files = Vec::new();
     let mut sample = false;
     // `--theme-file PATH`: follow that theme file for this run without saving it (#7573).
@@ -917,7 +949,7 @@ fn main() -> eframe::Result {
             s if s.starts_with("--max-file-size=") => max_file_size = Some(s.strip_prefix("--max-file-size=").map(str::to_string)),
             "--safe-mode" => safe_mode = true,
             "--version" | "-V" => {
-                println!("solidcraft {}", env!("CARGO_PKG_VERSION"));
+                println!("{} {}", solidcraft_engine::product::PRODUCT.xdg_folder, solidcraft_engine::product::PRODUCT.version);
                 return Ok(());
             }
             "--crash-log" => {
@@ -1067,7 +1099,7 @@ fn main() -> eframe::Result {
     let _driver_client = DriverClient;
     mark("run_native");
     let result = eframe::run_native(
-        "SolidCraft",
+        solidcraft_engine::product::PRODUCT.name,
         options,
         Box::new(move |cc| {
             created_in_app.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1622,8 +1654,14 @@ mod viewport_tests {
     fn desktop_viewport_supplies_the_original_mark_to_the_window() {
         let viewport = super::app_viewport(super::CUSTOM_TITLEBAR).expect("viewport");
         let icon = viewport.icon.expect("running window must have an icon");
-        assert_eq!((icon.width, icon.height), (64, 64));
-        assert_eq!(icon.rgba, super::app_icon::rgba(64).expect("original mark"));
+        #[cfg(feature = "brand-hasisolid")]
+        let expected = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/brands/hasisolid/app.png")).expect("HasiSolid icon");
+        #[cfg(all(feature = "brand-mssolid", not(feature = "brand-hasisolid")))]
+        let expected = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/brands/mssolid/app.png")).expect("MSSolid icon");
+        #[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
+        let expected = eframe::egui::IconData { rgba: super::app_icon::rgba(64).expect("original mark"), width: 64, height: 64 };
+        assert_eq!((icon.width, icon.height), (expected.width, expected.height));
+        assert_eq!(icon.rgba, expected.rgba);
         assert_eq!(viewport.app_id.as_deref(), Some(super::APP_ID));
     }
 

@@ -51,9 +51,10 @@ const LISTED: &[&str] = &[
     "icon",
 ];
 
-/// The command names a text mentions after `solidcraft-cli `, each one only once.
+/// The command names a text mentions after this product's CLI name, each one only once.
 fn mentioned(text: &str) -> Vec<&str> {
-    let mut names: Vec<&str> = text.split("solidcraft-cli ").skip(1).filter_map(|rest| rest.split_whitespace().next()).collect();
+    let prefix = format!("{}-cli ", solidcraft_engine::product::PRODUCT.xdg_folder);
+    let mut names: Vec<&str> = text.split(&prefix).skip(1).filter_map(|rest| rest.split_whitespace().next()).collect();
     names.sort_unstable();
     names.dedup();
     names
@@ -87,7 +88,7 @@ fn help_prints_usage_and_succeeds() {
         assert!(output.status.success(), "{arg}: {}", String::from_utf8_lossy(&output.stderr));
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.starts_with("usage:"), "{arg}: {stdout}");
-        assert!(stdout.contains("solidcraft-cli run"), "{arg}: {stdout}");
+        assert!(stdout.contains(&format!("{}-cli run", solidcraft_engine::product::PRODUCT.xdg_folder)), "{arg}: {stdout}");
         assert!(output.stderr.is_empty(), "{arg}: {}", String::from_utf8_lossy(&output.stderr));
     }
 }
@@ -119,8 +120,38 @@ fn the_top_level_usage_still_lists_every_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_solidcraft-cli")).arg("--help").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     for cmd in LISTED {
-        assert!(stdout.contains(&format!("solidcraft-cli {cmd}")), "{cmd}: {stdout}");
+        assert!(stdout.contains(&format!("{}-cli {cmd}", solidcraft_engine::product::PRODUCT.xdg_folder)), "{cmd}: {stdout}");
     }
+}
+
+#[cfg(any(feature = "brand-hasisolid", feature = "brand-mssolid"))]
+#[test]
+fn branded_help_and_icon_use_product_identity() {
+    let product = solidcraft_engine::product::PRODUCT;
+    let output = Command::new(env!("CARGO_BIN_EXE_solidcraft-cli")).args(["mcp", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains(&format!("{}-cli mcp", product.xdg_folder)));
+    assert!(help.contains(&format!("`{}` server", product.xdg_folder)));
+    assert!(!help.contains("solidcraft-cli"));
+    assert!(!help.contains("--live"));
+    let invalid = Command::new(env!("CARGO_BIN_EXE_solidcraft-cli")).args(["gpu", "--invalid"]).output().unwrap();
+    assert!(!invalid.status.success());
+    let error = String::from_utf8(invalid.stderr).unwrap();
+    assert!(error.contains(&format!("{}-cli gpu", product.xdg_folder)));
+    assert!(!error.contains("solidcraft-cli"));
+
+    let path = std::env::temp_dir().join(format!("{}-icon-{}.png", product.xdg_folder, std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_solidcraft-cli")).args(["icon", "--size", "64", "--out", path.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let actual = image::open(&path).unwrap().to_rgba8();
+    std::fs::remove_file(&path).unwrap();
+    #[cfg(feature = "brand-hasisolid")]
+    let source = include_bytes!("../../../assets/brands/hasisolid/app.png").as_slice();
+    #[cfg(feature = "brand-mssolid")]
+    let source = include_bytes!("../../../assets/brands/mssolid/app.png").as_slice();
+    let expected = image::load_from_memory(source).unwrap().resize_exact(64, 64, image::imageops::FilterType::Lanczos3).to_rgba8();
+    assert_eq!(actual, expected);
 }
 
 #[test]

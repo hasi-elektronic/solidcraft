@@ -786,6 +786,12 @@ struct Worker {
     no_reasoning: std::cell::Cell<bool>,
 }
 
+fn mcp_initialize_params() -> Value {
+    let product = solidcraft_engine::product::PRODUCT;
+    let version = if product.branded { product.version } else { env!("CARGO_PKG_VERSION") };
+    json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": format!("{}-agent-chat", product.xdg_folder), "version": version}})
+}
+
 impl Worker {
     fn emit(&self, e: Event) {
         let _ = self.events.send(e);
@@ -853,7 +859,7 @@ impl Worker {
 
     /// One MCP request to the server; its `result`.
     fn mcp_call(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let Some(m) = self.mcp.as_ref() else { return Err("no SolidCraft tools in this session".into()) };
+        let Some(m) = self.mcp.as_ref() else { return Err(format!("no {} tools in this session", solidcraft_engine::product::PRODUCT.name)) };
         self.next += 1;
         let id = self.next;
         m.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
@@ -876,9 +882,9 @@ impl Worker {
                     }
                     return Ok(v.get("result").cloned().unwrap_or(Value::Null));
                 }
-                Ok(FromAgent::Exited(_)) => return Err("the SolidCraft tools stopped".into()),
+                Ok(FromAgent::Exited(_)) => return Err(format!("the {} tools stopped", solidcraft_engine::product::PRODUCT.name)),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < deadline => {}
-                Err(_) => return Err("the SolidCraft tools did not answer".into()),
+                Err(_) => return Err(format!("the {} tools did not answer", solidcraft_engine::product::PRODUCT.name)),
             }
         }
     }
@@ -887,10 +893,7 @@ impl Worker {
         if self.mcp.is_none() {
             return Ok(());
         }
-        self.mcp_call(
-            "initialize",
-            json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "solidcraft-agent-chat", "version": env!("CARGO_PKG_VERSION")}}),
-        )?;
+        self.mcp_call("initialize", mcp_initialize_params())?;
         if let Some(m) = &self.mcp {
             m.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         }
@@ -1135,7 +1138,7 @@ impl Worker {
         match protocol {
             GoProtocol::Chat => self.body(),
             GoProtocol::Responses => {
-                let mut body = json!({"model": self.cfg.model, "input": go_responses_input(super::acp::SYSTEM_NOTE, &self.history)});
+                let mut body = json!({"model": self.cfg.model, "input": go_responses_input(super::acp::system_note(), &self.history)});
                 if let Some(tools) = self.go_tools(protocol) {
                     body["tools"] = tools;
                 }
@@ -1145,7 +1148,7 @@ impl Worker {
                 let mut body = json!({
                     "model": self.cfg.model,
                     "max_tokens": ANTHROPIC_MAX_TOKENS,
-                    "system": super::acp::SYSTEM_NOTE,
+                    "system": super::acp::system_note(),
                     "messages": go_anthropic_messages(&self.history),
                 });
                 if let Some(tools) = self.go_tools(protocol) {
@@ -1155,7 +1158,7 @@ impl Worker {
             }
             GoProtocol::Gemini => {
                 let mut body = json!({"contents": go_gemini_contents(&self.history, &self.gemini_sigs.borrow())});
-                body["systemInstruction"] = json!({"parts": [{"text": super::acp::SYSTEM_NOTE}]});
+                body["systemInstruction"] = json!({"parts": [{"text": super::acp::system_note()}]});
                 if let Some(tools) = self.go_tools(protocol) {
                     body["tools"] = tools;
                 }
@@ -1180,7 +1183,7 @@ impl Worker {
         match self.cfg.protocol {
             Protocol::OpenAi => {
                 let mut messages = Vec::with_capacity(self.history.len() + 1);
-                messages.push(json!({"role": "system", "content": super::acp::SYSTEM_NOTE}));
+                messages.push(json!({"role": "system", "content": super::acp::system_note()}));
                 messages.extend(self.history.iter().cloned());
                 let mut body = json!({"model": self.cfg.model, "messages": messages});
                 if let Some(effort) = self.reasoning_effort() {
@@ -1200,7 +1203,7 @@ impl Worker {
                 let mut body = json!({
                     "model": self.cfg.model,
                     "max_tokens": ANTHROPIC_MAX_TOKENS,
-                    "system": super::acp::SYSTEM_NOTE,
+                    "system": super::acp::system_note(),
                     "messages": &self.history,
                 });
                 if !self.tools.is_empty() {
@@ -1784,6 +1787,14 @@ pub fn test_endpoint(http: &HttpFn, base_url: &str, key: Option<&str>, model: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_initialize_uses_selected_product_identity() {
+        let product = solidcraft_engine::product::PRODUCT;
+        let params = mcp_initialize_params();
+        assert_eq!(params["clientInfo"]["name"], format!("{}-agent-chat", product.xdg_folder));
+        assert_eq!(params["clientInfo"]["version"], if product.branded { product.version } else { env!("CARGO_PKG_VERSION") });
+    }
 
     #[test]
     fn mcp_tools_become_function_tools_without_crash_reports() {
@@ -2985,7 +2996,7 @@ mod tests {
         assert!(matches!(events.last(), Some(Event::TurnEnded { reason }) if reason.is_empty()), "{events:?}");
         let sent = seen.lock().unwrap();
         assert_eq!(sent.len(), 2);
-        assert_eq!(sent[0]["system"], super::super::acp::SYSTEM_NOTE);
+        assert_eq!(sent[0]["system"], super::super::acp::system_note());
         assert_eq!(sent[0]["max_tokens"], ANTHROPIC_MAX_TOKENS);
         assert_eq!(sent[1]["messages"].as_array().unwrap().last().unwrap()["content"][0]["type"], "tool_result");
         assert_eq!(sent[1]["messages"].as_array().unwrap().last().unwrap()["content"][0]["tool_use_id"], "t1");

@@ -17,6 +17,8 @@ raytrace-cpu = ["solidcraft-render/raytrace-cpu"]
 # `src/schema/record.rs`), for checking a new contract against the whole test suite.
 param-audit = []
 solver-profiling = ["solidcraft-sketch/solver-profiling"]
+brand-hasisolid = ["solidcraft-product/brand-hasisolid"]
+brand-mssolid = ["solidcraft-product/brand-mssolid"]
 
 [[example]]
 name = "sketch_analysis_bench"
@@ -31,6 +33,7 @@ name = "sketch_target_bench"
 required-features = ["solver-profiling"]
 
 [dependencies]
+solidcraft-product = { workspace = true }
 solidcraft-geom = { workspace = true }
 solidcraft-sketch = { workspace = true }
 solidcraft-kernel = { workspace = true }

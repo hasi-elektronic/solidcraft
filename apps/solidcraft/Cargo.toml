@@ -8,6 +8,8 @@ publish = false
 default-run = "solidcraft"
 
 [features]
+brand-hasisolid = ["solidcraft-engine/brand-hasisolid", "solidcraft-ui-egui/brand-hasisolid"]
+brand-mssolid = ["solidcraft-engine/brand-mssolid", "solidcraft-ui-egui/brand-mssolid"]
 default = ["raytrace-cpu", "bundled-render-library"]
 bundled-render-library = ["solidcraft-engine/bundled-render-library"]
 raytrace-cpu = ["solidcraft-engine/raytrace-cpu"]
@@ -54,6 +56,7 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 quick-xml = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.56"
 hidapi = { version = "2.6.7", default-features = false, features = ["windows-native"] }
 # The main window's handle for src/native_frame.rs (already in the tree through eframe and winit).
 raw-window-handle = "0.6"

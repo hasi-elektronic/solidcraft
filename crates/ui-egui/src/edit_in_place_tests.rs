@@ -120,6 +120,742 @@ fn with_changed_links_left_alone_finish_editing_updates_the_assembly_itself() {
 }
 
 #[test]
+fn open_part_in_a_new_tab_hides_assembly_and_updates_it_on_finish() {
+    let mut f = assembly("solo-part");
+    f.app.preferences.update_changed_links = false;
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    assert!(showing(&f.app, &f.plate_file));
+    assert_eq!(f.app.docs.count(), 2);
+    let part = context(&f.app);
+    assert!(part.solo);
+    assert_eq!(part.bodies, 0);
+    assert!(part.triangles.is_empty());
+    f.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "operation": "new"})).unwrap();
+    finish(&mut f.app);
+    settle(&mut f.app);
+    assert_eq!(f.app.docs.count(), 1);
+    assert!((volume(&f.app) - 8000.0).abs() < 1e-6, "{}", volume(&f.app));
+}
+
+#[test]
+fn solo_edit_warns_and_updates_every_shared_placement() {
+    let mut f = assembly("solo-shared");
+    let second = f.app.run("component.insert_design", json!({"path": f.plate_file, "translate": [0, 100, 0], "reuse": true})).unwrap();
+    assert_eq!(second["component"].as_u64(), Some(f.plate));
+    f.app.run("file.save", json!({})).unwrap();
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    assert!(showing(&f.app, &f.plate_file));
+    assert_eq!(f.app.status.as_ref().map(|s| s.0.as_str()), Some(f.app.tr("ui.open_part_shared")));
+    f.app.session.read_only = true;
+    f.app.set_status("read-only notice", false);
+    warn_shared(&mut f.app);
+    assert_eq!(f.app.status.as_ref().map(|s| s.0.as_str()), Some("read-only notice"));
+    f.app.session.read_only = false;
+    f.app.set_status("link error", true);
+    warn_shared(&mut f.app);
+    assert_eq!(f.app.status.as_ref().map(|s| s.0.as_str()), Some("link error"));
+    f.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    finish(&mut f.app);
+    settle(&mut f.app);
+    assert!((volume(&f.app) - 15000.0).abs() < 1e-6, "both placements update: {}", volume(&f.app));
+}
+
+#[test]
+fn opening_an_unlinked_part_in_a_saved_assembly_never_creates_a_part_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let component = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30})).unwrap();
+    let assembly = dir.path().join("assembly.sc");
+    app.run("file.save", json!({"path":&assembly})).unwrap();
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a part must not ask for a file")));
+    crate::linked_source::open_part(&mut app, component, None);
+    assert!(!app.file_picker_busy());
+    assert_eq!(app.docs.count(), 2);
+    assert!(showing(&app, &assembly));
+    assert!(!dir.path().join("panel.sc").exists());
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    assert!((volume(&app) - 7000.0).abs() < 1e-6, "{}", volume(&app));
+}
+
+#[test]
+fn unsaved_assembly_part_opens_without_a_picker_and_edits_the_same_assembly() {
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30})).unwrap();
+    app.run("component.activate", json!({"component":0})).unwrap();
+    app.run("component.create", json!({"name":"Other"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10})).unwrap();
+    let state = app.session.world_state();
+    let panel_body = state.bodies.iter().find(|body| app.session.doc.model_body_component(body) == panel).unwrap().name.clone();
+    let other_body = state.bodies.iter().find(|body| app.session.doc.model_body_component(body) != panel).unwrap().name.clone();
+    drop(state);
+    let uid = app.session.uid;
+    let initial = volume(&app);
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a component must not ask for a file")));
+
+    crate::linked_source::open_part(&mut app, panel, None);
+    assert!(!app.file_picker_busy(), "opening a part must not display Save As");
+    assert_eq!(app.docs.count(), 2, "the component opens in its own tab");
+    assert_eq!(app.session.uid, uid, "the tab edits the assembly, not an unrelated copy");
+    assert_eq!(app.session.active_component, panel);
+    assert!(crate::documents::tabs_info(&app).iter().any(|(name, _)| name.contains("Panel")));
+    assert!(app.body_visible(&panel_body));
+    assert!(!app.body_visible(&other_body), "the standalone view must hide other components");
+
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    assert_eq!(app.session.uid, uid);
+    assert!(app.body_visible(&other_body), "returning to the assembly restores its original visibility");
+    assert!((volume(&app) - (initial + 1000.0)).abs() < 1e-6, "the assembly receives the edit");
+    app.run("edit.undo", json!({})).unwrap();
+    assert!((volume(&app) - initial).abs() < 1e-6, "assembly undo removes the part edit");
+    app.run("edit.redo", json!({})).unwrap();
+    assert!((volume(&app) - (initial + 1000.0)).abs() < 1e-6);
+
+    crate::documents::switch(&mut app, 1);
+    let part_tab = app.docs.active;
+    crate::documents::close(&mut app, part_tab, false);
+    assert_eq!(app.docs.count(), 1, "closing a view must not ask to save a separate part");
+    assert!(app.docs.closing.is_none());
+    assert!((volume(&app) - (initial + 1000.0)).abs() < 1e-6);
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("assembly.sc");
+    app.run("file.save", json!({"path":&file})).unwrap();
+    let mut reopened = Session::default();
+    reopened.execute("doc.open", &json!({"path":file})).unwrap();
+    assert!((volume_of(&reopened, "") - (initial + 1000.0)).abs() < 1e-6, "saving and reopening retains the edited assembly");
+}
+
+#[test]
+fn part_view_updates_all_placements_of_a_shared_component() {
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30})).unwrap();
+    app.run("component.activate", json!({"component":0})).unwrap();
+    app.run("occurrence.copy", json!({"component":panel,"translate":[100,0,0]})).unwrap();
+    let before = volume(&app);
+    crate::linked_source::open_part(&mut app, panel, None);
+    assert_eq!(app.docs.count(), 2);
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    assert!((volume(&app) - before - 2000.0).abs() < 1e-6, "both placements must contain the added body");
+    app.run("edit.undo", json!({})).unwrap();
+    assert!((volume(&app) - before).abs() < 1e-6);
+}
+
+#[test]
+fn closing_another_tab_during_a_sketch_keeps_its_session_if_part_tab_cannot_be_selected() {
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30})).unwrap();
+    crate::linked_source::open_part(&mut app, panel, None);
+    assert_eq!(app.docs.count(), 2);
+    crate::documents::new_tab(&mut app);
+    assert_eq!(app.docs.count(), 3);
+    app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    let uid = app.session.uid;
+    let active = app.docs.active;
+    assert!(app.session.active_sketch.is_some());
+    crate::documents::close(&mut app, active, true);
+    assert_eq!(app.docs.count(), 3, "a failed switch must not remove the active tab");
+    assert_eq!(app.docs.active, active);
+    assert_eq!(app.session.uid, uid);
+    assert!(app.session.active_sketch.is_some());
+}
+
+#[test]
+fn component_view_respects_previously_hidden_bodies() {
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30,"body_name":"Visible"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Hidden"})).unwrap();
+    app.run("browser.visibility", json!({"items":["Hidden"],"visible":false})).unwrap();
+    assert!(!app.body_visible("Hidden"));
+    crate::linked_source::open_part(&mut app, panel, None);
+    assert_eq!(app.docs.count(), 2);
+    assert!(app.body_visible("Visible"));
+    assert!(!app.body_visible("Hidden"), "a component view must not reveal a hidden body");
+    crate::documents::switch(&mut app, 0);
+    assert!(!app.body_visible("Hidden"), "the assembly's original visibility remains unchanged");
+}
+
+#[test]
+fn context_menu_offers_each_body_in_a_multi_body_component_without_a_save_dialog() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Side panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30,"body_name":"Tray"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap();
+    app.run("component.activate", json!({"component":0})).unwrap();
+    app.run("component.create", json!({"name":"Other"})).unwrap();
+    app.run("solid.box", json!({"length":5,"width":5,"height":5,"body_name":"Other body"})).unwrap();
+    let body_menu = context_menu::items(&app, &Target::Body { name: "Tray".into() });
+    let open = body_menu.into_iter().find(|item| item.id == "ui.openPart").expect("the body menu offers opening its component");
+    let menu = context_menu::items(&app, &Target::Component { id: panel });
+    let choices = menu.iter().find(|item| item.id == "ui.openPartChoices").expect("component menu lists individual bodies");
+    for name in ["Tray", "Perforated"] {
+        assert!(choices.children.iter().any(|item| item.id == "ui.openPart" && item.params.as_ref().is_some_and(|p| p["body"] == name)));
+    }
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a part must not ask for a file")));
+    context_menu::run_item(&mut app, &open, egui::Pos2::ZERO);
+    assert_eq!(app.docs.count(), 2);
+    assert_eq!(app.session.active_component, panel);
+    assert!(app.body_visible("Tray") && !app.body_visible("Perforated"));
+    assert!(!app.body_visible("Other body"));
+    assert!(!app.file_picker_busy());
+}
+
+#[test]
+fn each_body_in_one_component_opens_separately_and_both_edits_update_the_assembly() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("component.create", json!({"name":"Side wall"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30,"body_name":"Tray"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"corner":[30,0,0],"operation":"new","body_name":"Perforated"})).unwrap();
+    app.run("component.activate", json!({"component":0})).unwrap();
+    app.run("component.create", json!({"name":"Other"})).unwrap();
+    app.run("solid.box", json!({"length":5,"width":5,"height":5,"body_name":"Other body"})).unwrap();
+    let original = app.session.uid;
+    let open = |app: &mut SolveApp, name: &str| {
+        let item = context_menu::items(app, &Target::Body { name: name.into() })
+            .into_iter()
+            .find(|item| item.id == "ui.openPart")
+            .expect("part context menu");
+        context_menu::run_item(app, &item, egui::Pos2::ZERO);
+        assert!(!app.file_picker_busy());
+    };
+    open(&mut app, "Tray");
+    assert_eq!(app.docs.count(), 2);
+    assert!(app.body_visible("Tray"));
+    assert!(!app.body_visible("Perforated"), "the other body in the same component must be hidden");
+    assert!(!app.body_visible("Other body"));
+    crate::documents::switch(&mut app, 0);
+    open(&mut app, "Perforated");
+    assert_eq!(app.docs.count(), 3, "opening another part must not require closing the first");
+    assert!(app.body_visible("Perforated"));
+    assert!(!app.body_visible("Tray"));
+    app.run("solid.move", json!({"bodies":["Perforated"],"translate":[0,2,0]})).unwrap();
+    assert!(app.body_visible("Perforated"), "editing the selected body must not make it disappear");
+    crate::documents::switch(&mut app, 2);
+    assert_eq!(app.session.uid, original);
+    assert!(app.body_visible("Tray") && !app.body_visible("Perforated"));
+    app.run("solid.move", json!({"bodies":["Tray"],"translate":[1,0,0]})).unwrap();
+    assert!(app.body_visible("Tray"), "a changed body remains in its own view");
+    crate::documents::switch(&mut app, 0);
+    let measured = app.run("inspect.measure", json!({"bodies":["Tray","Perforated"]})).unwrap();
+    let body_min = |name: &str, axis: usize| {
+        measured["bodies"].as_array().unwrap().iter().find(|body| body["name"] == name).unwrap()["bbox"]["min"][axis].as_f64().unwrap()
+    };
+    assert!((body_min("Tray", 0) - 1.0).abs() < 1e-6);
+    assert!((body_min("Perforated", 1) - 2.0).abs() < 1e-6);
+    crate::documents::close(&mut app, 1, false);
+    assert_eq!(app.docs.count(), 2, "one part tab closes without closing the other");
+    crate::documents::switch(&mut app, 1);
+    assert!(app.body_visible("Tray") && !app.body_visible("Perforated"));
+    crate::documents::close(&mut app, 1, false);
+    assert_eq!(app.docs.count(), 1);
+    assert_eq!(app.session.uid, original);
+    assert!(app.session.is_dirty(), "both edits remain in the assembly");
+}
+
+#[test]
+fn more_than_thirty_two_parts_can_be_open_at_once() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("component.create", json!({"name":"Many parts"})).unwrap();
+    for n in 0..34 {
+        app.run("solid.box", json!({"length":1,"width":1,"height":1,"corner":[n * 2,0,0],"operation":"new","body_name":format!("Part {n}")}))
+            .unwrap();
+    }
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a part must not ask for a file")));
+    for n in 0..34 {
+        crate::documents::switch(&mut app, 0);
+        let body = format!("Part {n}");
+        let open = context_menu::items(&app, &Target::Body { name: body.clone() })
+            .into_iter()
+            .find(|item| item.id == "ui.openPart")
+            .expect("each body has an open action");
+        context_menu::run_item(&mut app, &open, egui::Pos2::ZERO);
+        assert!(app.body_visible(&body));
+        assert!(!app.file_picker_busy());
+    }
+    assert_eq!(app.docs.count(), 35, "the document-tab limit must not cap part views");
+    crate::documents::switch(&mut app, 0);
+    for expected in (2..=35).rev() {
+        let last = app.docs.count() - 1;
+        crate::documents::close(&mut app, last, false);
+        assert_eq!(app.docs.count(), expected - 1, "each view can be closed independently");
+    }
+    assert!(app.session.is_dirty(), "closing views must not discard the assembly");
+}
+
+#[test]
+fn body_view_follows_body_rename_and_undo_without_revealing_siblings() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("component.create", json!({"name":"Side wall"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30,"body_name":"Tray"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap();
+    let item = context_menu::items(&app, &Target::Body { name: "Tray".into() }).into_iter().find(|item| item.id == "ui.openPart").unwrap();
+    context_menu::run_item(&mut app, &item, egui::Pos2::ZERO);
+    app.run("body.rename", json!({"body":"Tray","name":"Tray renamed"})).unwrap();
+    assert!(app.body_visible("Tray renamed"));
+    assert!(!app.body_visible("Perforated"));
+    app.run("edit.undo", json!({})).unwrap();
+    assert!(app.body_visible("Tray"));
+    assert!(!app.body_visible("Perforated"));
+}
+
+#[test]
+fn multi_body_occurrence_menu_uses_the_selected_second_placement() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Side wall"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30,"body_name":"Tray"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap();
+    app.run("component.activate", json!({"component":0})).unwrap();
+    let occ = app.run("occurrence.copy", json!({"component":panel,"translate":[100,0,0]})).unwrap()["occurrence"].as_u64().unwrap();
+    let path = app.session.doc.placements().into_iter().map(|(_, p, _)| p).find(|p| p.last() == Some(&occ)).unwrap();
+    let names = app.session.occurrence_bodies(&path, true).unwrap();
+    assert_eq!(names.len(), 2);
+    let menu = context_menu::items(&app, &Target::Occurrence { path: path.clone() });
+    let choices = menu.iter().find(|item| item.id == "ui.openPartChoices").expect("each body offered separately");
+    for body in &names {
+        assert!(
+            choices
+                .children
+                .iter()
+                .any(|item| item.id == "ui.openPart" && item.params.as_ref().is_some_and(|p| p["body"] == *body && p["path"] == json!(path)))
+        );
+    }
+    let picked = choices.children.iter().find(|item| item.params.as_ref().is_some_and(|p| p["body"] == names[0])).unwrap().clone();
+    context_menu::run_item(&mut app, &picked, egui::Pos2::ZERO);
+    assert_eq!(app.session.active_occurrence_path.as_deref(), Some(path.as_slice()));
+    assert!(app.body_visible(&names[0]) && !app.body_visible(&names[1]));
+}
+
+#[test]
+fn cutting_one_part_does_not_modify_an_overlapping_sibling_in_the_same_component() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("component.create", json!({"name":"Side wall"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Tray"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap();
+    let item = context_menu::items(&app, &Target::Body { name: "Tray".into() }).into_iter().find(|item| item.id == "ui.openPart").unwrap();
+    context_menu::run_item(&mut app, &item, egui::Pos2::ZERO);
+    assert!(app.body_visible("Tray") && !app.body_visible("Perforated"));
+    app.run("solid.box", json!({"length":2,"width":2,"height":5,"corner":[2,2,0],"operation":"cut"})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    let measured = app.run("inspect.measure", json!({"bodies":["Tray","Perforated"]})).unwrap();
+    let vol = |name: &str| measured["bodies"].as_array().unwrap().iter().find(|body| body["name"] == name).unwrap()["volume_mm3"].as_f64().unwrap();
+    assert!((vol("Tray") - 980.0).abs() < 1e-4, "the selected part receives the cut");
+    assert!((vol("Perforated") - 1000.0).abs() < 1e-4, "the sibling remains untouched");
+    app.run("edit.undo", json!({})).unwrap();
+    assert!((volume(&app) - 2000.0).abs() < 1e-4, "the cut is one assembly undo step");
+}
+
+#[test]
+fn part_view_refuses_explicit_edits_of_a_hidden_sibling_atomically() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("component.create", json!({"name":"Side wall"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Tray"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap();
+    let item = context_menu::items(&app, &Target::Body { name: "Tray".into() }).into_iter().find(|item| item.id == "ui.openPart").unwrap();
+    context_menu::run_item(&mut app, &item, egui::Pos2::ZERO);
+    let original = serde_json::to_value(&*app.session.doc).unwrap();
+    let undo = app.session.undo.len();
+    assert!(app.run("solid.move", json!({"bodies":["Perforated"],"translate":[1,0,0]})).is_err());
+    assert_eq!(serde_json::to_value(&*app.session.doc).unwrap(), original, "a refused edit must not change the assembly");
+    assert_eq!(app.session.undo.len(), undo);
+    assert!(app.body_visible("Tray") && !app.body_visible("Perforated"));
+}
+
+#[test]
+fn part_view_refuses_new_hidden_bodies_atomically() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("component.create", json!({"name":"Side wall"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Tray"})).unwrap();
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap();
+    let item = context_menu::items(&app, &Target::Body { name: "Tray".into() }).into_iter().find(|item| item.id == "ui.openPart").unwrap();
+    context_menu::run_item(&mut app, &item, egui::Pos2::ZERO);
+    let original = serde_json::to_value(&*app.session.doc).unwrap();
+    let undo = app.session.undo.len();
+    assert!(app.run("solid.box", json!({"length":2,"width":2,"height":2,"operation":"new","body_name":"Hidden"})).is_err());
+    assert_eq!(serde_json::to_value(&*app.session.doc).unwrap(), original);
+    assert_eq!(app.session.undo.len(), undo);
+}
+
+#[test]
+fn part_view_browser_lists_only_the_selected_body() {
+    use crate::context_menu::{self, Target};
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    h.app.ui.show_browser = true;
+    h.app.run("component.create", json!({"name":"Side wall"})).unwrap();
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Tray"})).unwrap();
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap();
+    let item = context_menu::items(&h.app, &Target::Body { name: "Tray".into() }).into_iter().find(|item| item.id == "ui.openPart").unwrap();
+    context_menu::run_item(&mut h.app, &item, egui::Pos2::ZERO);
+    h.frames(3);
+    let rows = crate::browser::drawn_rows();
+    assert!(rows.iter().any(|row| row.0 == "Tray"));
+    assert!(!rows.iter().any(|row| row.0 == "Perforated"), "the sibling must not appear as a selectable browser row");
+    crate::documents::switch(&mut h.app, 0);
+    h.frames(3);
+    assert!(h.app.body_visible("Perforated"));
+}
+
+#[test]
+fn part_view_can_edit_its_own_feature_without_changing_a_sibling() {
+    use crate::context_menu::{self, Target};
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    h.app.preferences.language = "en".into();
+    h.app.run("component.create", json!({"name":"Side wall"})).unwrap();
+    let tray = h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Tray"})).unwrap()["feature"].as_u64().unwrap();
+    let other = h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new","body_name":"Perforated"})).unwrap()["feature"]
+        .as_u64()
+        .unwrap();
+    let item = context_menu::items(&h.app, &Target::Body { name: "Tray".into() }).into_iter().find(|item| item.id == "ui.openPart").unwrap();
+    context_menu::run_item(&mut h.app, &item, egui::Pos2::ZERO);
+    assert!(crate::documents::component_view_feature_editable(&h.app, tray));
+    assert!(!crate::documents::component_view_feature_editable(&h.app, other));
+    h.app.edit_feature(tray);
+    h.frames(4);
+    let dialog = h.app.dialog.as_mut().expect("the selected part's own feature opens for editing");
+    let crate::dialogs::Kind::Primitive { fields, .. } = &mut dialog.kind else { panic!("box editor") };
+    fields.iter_mut().find(|(name, _)| *name == "length").unwrap().1 = "12 mm".into();
+    for _ in 0..1000 {
+        h.frames(1);
+        if !h.app.preview.busy {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(h.app.preview.error.is_none(), "feature preview: {:?}", h.app.preview.error);
+    h.step(&json!({"widget":"OK"})).unwrap();
+    for _ in 0..5000 {
+        h.frames(1);
+        if h.app.dialog.is_none() || h.app.dialog.as_ref().is_some_and(|dialog| dialog.error.is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(h.app.dialog.is_none(), "the feature edit applies: {:?}", h.app.dialog.as_ref().and_then(|dialog| dialog.error.as_ref()));
+    crate::documents::switch(&mut h.app, 0);
+    let result = h.app.run("inspect.measure", json!({"bodies":["Tray","Perforated"]})).unwrap();
+    let volume = |name: &str| result["bodies"].as_array().unwrap().iter().find(|body| body["name"] == name).unwrap()["volume_mm3"].as_f64().unwrap();
+    assert!((volume("Tray") - 1200.0).abs() < 1e-4);
+    assert!((volume("Perforated") - 1000.0).abs() < 1e-4, "the sibling's geometry remains unchanged");
+}
+
+#[test]
+fn body_context_menu_opens_the_selected_second_placement() {
+    use crate::context_menu::{self, Target};
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30,"body_name":"Panel body"})).unwrap();
+    app.run("component.activate", json!({"component":0})).unwrap();
+    let occurrence = app.run("occurrence.copy", json!({"component":panel,"translate":[100,0,0]})).unwrap()["occurrence"].as_u64().unwrap();
+    let path = app.session.doc.placements().into_iter().map(|(_, path, _)| path).find(|path| path.last() == Some(&occurrence)).unwrap();
+    let second_body = app.session.occurrence_bodies(&path, true).unwrap().into_iter().next().unwrap();
+    let open = context_menu::items(&app, &Target::Body { name: second_body.clone() })
+        .into_iter()
+        .find(|item| item.id == "ui.openPart")
+        .expect("the second placement's body offers open");
+    context_menu::run_item(&mut app, &open, egui::Pos2::ZERO);
+    assert_eq!(app.docs.count(), 2);
+    assert_eq!(app.session.active_occurrence_path.as_deref(), Some(path.as_slice()));
+    assert!(app.body_visible(&second_body));
+    let placement = app.session.occurrence_placement(&path).unwrap();
+    assert_eq!(placement.component, panel);
+}
+
+#[test]
+fn component_edits_survive_switching_through_an_unrelated_document() {
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30})).unwrap();
+    let assembly_uid = app.session.uid;
+    crate::linked_source::open_part(&mut app, panel, None);
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    crate::documents::new_tab(&mut app);
+    assert_eq!(app.docs.count(), 3);
+    let other_uid = app.session.uid;
+    assert_ne!(other_uid, assembly_uid);
+    crate::documents::switch(&mut app, 0);
+    assert_eq!(app.session.uid, assembly_uid);
+    assert!((volume(&app) - 7000.0).abs() < 1e-6);
+    crate::documents::switch(&mut app, 2);
+    assert_eq!(app.session.uid, other_uid);
+    crate::documents::switch(&mut app, 1);
+    assert_eq!(app.session.uid, assembly_uid);
+    assert_eq!(app.session.active_component, panel);
+    assert!((volume(&app) - 7000.0).abs() < 1e-6);
+    app.run("edit.undo", json!({})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    assert!((volume(&app) - 6000.0).abs() < 1e-6);
+}
+
+#[test]
+fn quit_from_component_view_asks_once_for_assembly_and_cancel_keeps_edits() {
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let panel = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30})).unwrap();
+    let uid = app.session.uid;
+    crate::linked_source::open_part(&mut app, panel, None);
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    crate::documents::request_quit(&mut app);
+    assert_eq!(app.docs.count(), 1, "the view has no separate file to save");
+    assert_eq!(app.docs.closing, Some(0));
+    assert_eq!(app.session.uid, uid);
+    crate::documents::answer_prompt(&mut app, crate::documents::Answer::Cancel);
+    assert!(app.docs.quitting.is_none());
+    assert!(!app.quit_requested);
+    assert!((volume(&app) - 7000.0).abs() < 1e-6, "cancelling quit must preserve edits");
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied private customer assembly"]
+fn customer_assembly_part_view_opens_without_a_file_and_updates_the_assembly() {
+    use crate::context_menu::{self, Target};
+    let file = std::env::var("SOLIDCRAFT_PART_ASSEMBLY").expect("set SOLIDCRAFT_PART_ASSEMBLY to the customer STEP or design");
+    let wanted = std::env::var("SOLIDCRAFT_PART_NAME").expect("set SOLIDCRAFT_PART_NAME to part of the component name");
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("doc.open", json!({"path":file})).unwrap();
+    let component = app.session.doc.components.iter().find(|c| c.name.contains(&wanted)).expect("customer component exists").id;
+    let uid = app.session.uid;
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a part must not ask for a file")));
+    let menu = context_menu::items(&app, &Target::Component { id: component });
+    let open = menu
+        .iter()
+        .find(|item| item.id == "ui.openPart")
+        .cloned()
+        .or_else(|| menu.iter().find(|item| item.id == "ui.openPartChoices").and_then(|item| item.children.first()).cloned())
+        .expect("the customer's component menu must offer opening the part");
+    let body = open.params.as_ref().unwrap()["body"].as_str().unwrap().to_string();
+    let owner = open.params.as_ref().unwrap()["component"].as_u64().unwrap();
+    let before = app.run("inspect.measure", json!({"bodies":[body]})).unwrap()["bodies"][0]["bbox"]["min"][0].as_f64().unwrap();
+    context_menu::run_item(&mut app, &open, egui::Pos2::ZERO);
+    assert!(!app.file_picker_busy());
+    assert_eq!(app.docs.count(), 2);
+    assert_eq!(app.session.uid, uid);
+    assert_eq!(app.session.active_component, owner);
+    app.run("solid.move", json!({"bodies":[body],"translate":[1,0,0]})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    assert_eq!(app.session.uid, uid);
+    let moved = app.run("inspect.measure", json!({"bodies":[body]})).unwrap()["bodies"][0]["bbox"]["min"][0].as_f64().unwrap();
+    assert!((moved - before - 1.0).abs() < 1e-5, "the assembly receives the selected part's edit");
+    app.run("edit.undo", json!({})).unwrap();
+    let undone = app.run("inspect.measure", json!({"bodies":[body]})).unwrap()["bodies"][0]["bbox"]["min"][0].as_f64().unwrap();
+    assert!((undone - before).abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "requires the private customer STEP assembly"]
+fn customer_side_wall_opens_tray_and_perforated_part_in_separate_tabs() {
+    use crate::context_menu::{self, Target};
+    let file = std::env::var("SOLIDCRAFT_MULTI_ASSEMBLY").expect("set SOLIDCRAFT_MULTI_ASSEMBLY to the customer STEP fixture");
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    app.run("doc.open", json!({"path":file})).unwrap();
+    let component_id = |name: &str| app.session.doc.components.iter().find(|c| c.name == name).expect("customer component exists").id;
+    let group = component_id("SHR470-SW2-00");
+    let tray = component_id("SHR470-SW2");
+    let perforated = component_id("SHR470-LB2");
+    let menu = context_menu::items(&app, &Target::Component { id: group });
+    let choices = menu.iter().find(|item| item.id == "ui.openPartChoices").expect("the two parts are offered separately");
+    let find = |id| choices.children.iter().find(|item| item.params.as_ref().is_some_and(|p| p["component"] == id)).unwrap().clone();
+    let first = find(tray);
+    let second = find(perforated);
+    let first_name = first.params.as_ref().unwrap()["body"].as_str().unwrap().to_string();
+    let second_name = second.params.as_ref().unwrap()["body"].as_str().unwrap().to_string();
+    let before1 = app.run("inspect.measure", json!({"bodies":[first_name]})).unwrap()["bodies"][0]["bbox"]["min"][0].as_f64().unwrap();
+    let before2 = app.run("inspect.measure", json!({"bodies":[second_name]})).unwrap()["bodies"][0]["bbox"]["min"][1].as_f64().unwrap();
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a part must not ask for a file")));
+    context_menu::run_item(&mut app, &first, egui::Pos2::ZERO);
+    assert!(app.body_visible(&first_name) && !app.body_visible(&second_name));
+    crate::documents::switch(&mut app, 0);
+    context_menu::run_item(&mut app, &second, egui::Pos2::ZERO);
+    assert_eq!(app.docs.count(), 3);
+    assert!(app.body_visible(&second_name) && !app.body_visible(&first_name));
+    app.run("solid.move", json!({"bodies":[second_name],"translate":[0,2,0]})).unwrap();
+    crate::documents::switch(&mut app, 2);
+    assert!(app.body_visible(&first_name) && !app.body_visible(&second_name));
+    app.run("solid.move", json!({"bodies":[first_name],"translate":[1,0,0]})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    assert!(!app.file_picker_busy());
+    let moved1 = app.run("inspect.measure", json!({"bodies":[first_name]})).unwrap()["bodies"][0]["bbox"]["min"][0].as_f64().unwrap();
+    let moved2 = app.run("inspect.measure", json!({"bodies":[second_name]})).unwrap()["bodies"][0]["bbox"]["min"][1].as_f64().unwrap();
+    assert!((moved1 - before1 - 1.0).abs() < 1e-5 && (moved2 - before2 - 2.0).abs() < 1e-5);
+    let dir = tempfile::tempdir().unwrap();
+    let saved = dir.path().join("edited-assembly.sc");
+    app.run("file.save", json!({"path":&saved})).unwrap();
+    let mut reopened = Session::default();
+    reopened.execute("doc.open", &json!({"path":saved})).unwrap();
+    let again1 = reopened.execute("inspect.measure", &json!({"bodies":[first_name]})).unwrap()["bodies"][0]["bbox"]["min"][0].as_f64().unwrap();
+    let again2 = reopened.execute("inspect.measure", &json!({"bodies":[second_name]})).unwrap()["bodies"][0]["bbox"]["min"][1].as_f64().unwrap();
+    assert!((again1 - moved1).abs() < 1e-5 && (again2 - moved2).abs() < 1e-5, "both part edits survive saving and reopening");
+}
+
+#[test]
+fn closing_a_saved_solo_tab_refreshes_the_assembly_even_with_auto_update_disabled() {
+    let mut f = assembly("solo-close");
+    f.app.preferences.update_changed_links = false;
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    f.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    f.app.run("file.save", json!({})).unwrap();
+    let active = f.app.docs.active;
+    crate::documents::close(&mut f.app, active, false);
+    settle(&mut f.app);
+    assert_eq!(f.app.docs.count(), 1);
+    assert!((volume(&f.app) - 8000.0).abs() < 1e-6, "{}", volume(&f.app));
+}
+
+#[test]
+fn solo_finish_requests_link_refresh_even_when_file_stamp_did_not_change() {
+    let mut f = assembly("solo-unchanged-stamp");
+    f.app.preferences.update_changed_links = true;
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    finish(&mut f.app);
+    assert!(f.app.file_load.busy(), "solo finish requests the link explicitly, independent of timestamp and size");
+    settle(&mut f.app);
+    assert_eq!(f.app.docs.count(), 1);
+}
+
+#[test]
+fn solo_finish_also_refreshes_other_links_when_automatic_update_is_enabled() {
+    let mut f = assembly("solo-other-link");
+    f.app.preferences.update_changed_links = true;
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    f.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    save_box(&f.post_file, [10.0, 10.0, 10.0], true);
+    finish(&mut f.app);
+    settle(&mut f.app);
+    assert!((volume(&f.app) - 8250.0).abs() < 1e-6, "{}", volume(&f.app));
+}
+
+#[test]
+fn solo_finish_updates_its_part_even_if_another_link_is_missing() {
+    let mut f = assembly("solo-missing-other-link");
+    f.app.preferences.update_changed_links = true;
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    f.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    std::fs::remove_file(&f.post_file).unwrap();
+    finish(&mut f.app);
+    settle(&mut f.app);
+    assert!((volume(&f.app) - 8000.0).abs() < 1e-6, "the changed part updates while the missing part keeps its cached geometry: {}", volume(&f.app));
+}
+
+#[test]
+fn solo_edit_keeps_its_assembly_open_during_close_all_and_quit() {
+    let mut f = assembly("solo-keep-assembly");
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    crate::documents::close(&mut f.app, 0, false);
+    assert_eq!(f.app.docs.count(), 2, "the assembly cannot close while its part is being edited");
+    crate::documents::close_many(&mut f.app, vec![0, 1]);
+    assert_eq!(f.app.docs.count(), 2);
+    crate::documents::request_quit(&mut f.app);
+    assert!(!f.app.quit_requested);
+    assert!(f.app.status.as_ref().is_some_and(|(_, _, error)| *error));
+    finish(&mut f.app);
+    settle(&mut f.app);
+    assert_eq!(f.app.docs.count(), 1);
+}
+
+#[test]
+fn discarding_only_unsaved_changes_still_refreshes_the_last_saved_part() {
+    let mut f = assembly("solo-discard");
+    f.app.preferences.update_changed_links = false;
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    f.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    f.app.run("file.save", json!({})).unwrap();
+    f.app.run("solid.box", json!({"corner":[100,0,0],"length":5,"width":5,"height":5,"operation":"new"})).unwrap();
+    let active = f.app.docs.active;
+    crate::documents::close(&mut f.app, active, false);
+    crate::documents::answer_prompt(&mut f.app, crate::documents::Answer::Cancel);
+    assert!(f.app.session.is_dirty());
+    assert_eq!(f.app.docs.count(), 2);
+    crate::documents::close(&mut f.app, active, false);
+    crate::documents::answer_prompt(&mut f.app, crate::documents::Answer::DontSave);
+    settle(&mut f.app);
+    assert_eq!(f.app.docs.count(), 1);
+    assert!((volume(&f.app) - 8000.0).abs() < 1e-6, "{}", volume(&f.app));
+}
+
+#[test]
+fn a_solo_part_saved_as_another_file_can_close_without_replacing_the_link() {
+    let mut f = assembly("solo-save-as");
+    f.app.preferences.update_changed_links = false;
+    open_solo(&mut f.app, f.plate, None, false);
+    settle(&mut f.app);
+    f.app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    let copy = f.folder.join("copy.sc");
+    f.app.run("file.save_as", json!({"path":copy})).unwrap();
+    let active = f.app.docs.active;
+    crate::documents::close(&mut f.app, active, false);
+    assert!(
+        f.app.status.as_ref().is_some_and(|(_, _, warning)| *warning),
+        "closing a Save As copy warns that the assembly retains its original link"
+    );
+    settle(&mut f.app);
+    assert!(copy.is_file());
+    assert_eq!(f.app.docs.count(), 1);
+    assert!((volume(&f.app) - 7000.0).abs() < 1e-6, "{}", volume(&f.app));
+}
+
+#[test]
+fn opening_a_part_does_not_save_the_unsaved_assembly_or_create_a_part_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let component = app.run("component.create", json!({"name":"Panel"})).unwrap()["component"].as_u64().unwrap();
+    app.run("solid.box", json!({"length":10,"width":20,"height":30})).unwrap();
+    let assembly = dir.path().join("assembly.sc");
+    let part = dir.path().join("part.sc");
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a part must not ask for a file")));
+    let undo = app.session.undo.len();
+    crate::linked_source::open_part(&mut app, component, None);
+    assert!(!app.file_picker_busy());
+    assert_eq!(app.docs.count(), 2);
+    assert!(app.session.path.is_none());
+    assert_eq!(app.session.undo.len(), undo, "opening a view must not edit the model");
+    assert!(!assembly.exists() && !part.exists());
+}
+
+#[test]
+fn opening_a_linked_part_in_an_unsaved_assembly_never_requests_an_assembly_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let part = dir.path().join("source.sc");
+    save_box(&part, [10.0, 20.0, 30.0], false);
+    let original_source = std::fs::read(&part).unwrap();
+    let mut app = SolveApp::new(Session::default(), Default::default());
+    let component = app.run("component.insert_design", json!({"path":&part})).unwrap()["component"].as_u64().unwrap();
+    assert!(app.session.path.is_none());
+    app.services.pick_save = Some(Box::new(|_, _| panic!("opening a part must not ask for an assembly file")));
+    crate::linked_source::open_part(&mut app, component, None);
+    assert!(!app.file_picker_busy());
+    assert_eq!(app.docs.count(), 2);
+    assert!(app.session.path.is_none());
+    assert_eq!(app.status.as_ref().map(|status| status.0.as_str()), Some(app.tr("ui.part_view_link_scope")));
+    app.run("solid.box", json!({"length":10,"width":10,"height":10,"operation":"new"})).unwrap();
+    crate::documents::switch(&mut app, 0);
+    assert!((volume(&app) - 7000.0).abs() < 1e-6, "the new feature is retained in the assembly");
+    assert_eq!(std::fs::read(&part).unwrap(), original_source, "the original linked part must not be overwritten");
+}
+
+#[test]
 fn update_links_in_the_part_refreshes_the_assembly_around_it() {
     let mut f = assembly("refresh");
     double_click_component(&mut f.app, json!({"component": f.plate}));
@@ -139,7 +875,9 @@ fn update_links_in_the_part_refreshes_the_assembly_around_it() {
     let assembly = crate::documents::session_at(&f.app, &after.assembly).unwrap();
     assert!((volume_of(assembly, "") - 7250.0).abs() < 1e-6, "{}", volume_of(assembly, ""));
     assert!(assembly.is_dirty(), "the assembly keeps its own copy of the linked bodies");
-    assert_eq!(f.app.status.as_ref().map(|s| s.0.as_str()), Some("Update Links done"));
+    let language = crate::i18n::Locale::for_language(&f.app.preferences.language);
+    let expected = language.format("ui.command_done", &[("command", language.label(crate::command_label("component.update_links")))]);
+    assert_eq!(f.app.status.as_ref().map(|s| s.0.as_str()), Some(expected.as_str()));
     // Finishing afterwards reads nothing again: the refresh read every link
     finish(&mut f.app);
     assert!(f.app.file_load.idle(), "the assembly read its links in the refresh already");
@@ -388,6 +1126,8 @@ fn finish_editing_is_a_model_tab_button_only_while_a_part_is_edited_in_place() {
     double_click_component(&mut h.app, json!({"component": f.plate}));
     settle(&mut h.app);
     h.frames(3);
+    h.step(&json!({"click":{"handle":"tab:MODEL"}})).unwrap();
+    h.frames(2);
     assert!(crate::scenario::rect_of("panel:MODEL:FINISH EDITING").is_some(), "the part's MODEL tab ends with Finish Edit");
     h.app.start("component.finish_edit");
     settle(&mut h.app);

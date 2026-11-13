@@ -391,19 +391,27 @@ pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
     colors.cut_tint = app.preferences.cut_preview_tint;
     let key = job_key(&cmds, app.session.revision, colors);
     let stream_key = stream_key(&cmds, app.session.revision, colors);
-    let tool = as_new_body(&cmds).is_some();
+    // A part editor is rolled back past the feature being edited. Preview the complete
+    // transaction against its pinned original, just as OK does, so the part boundary is
+    // checked against the full assembly rather than against that temporary state.
+    let part_editor = app.dialog.as_ref().is_some_and(|d| d.editing.is_some() && d.previews())
+        && crate::documents::component_view_has_body(app) && app.editing_state.is_some();
+    let tool = !part_editor && as_new_body(&cmds).is_some();
     let pv = &mut app.preview;
     pv.poll(key, stream_key);
     if pv.running.is_none() && pv.shown_key != Some(key) {
         pv.started = crate::now_ms();
         pv.running_stream_key = stream_key;
-        let mut straight = std::mem::take(&mut app.preview.straight);
-        let mut job = straight.compute(app, &cmds, colors);
-        app.preview.straight = straight;
-        if job.is_none() {
-            let mut moving = std::mem::take(&mut app.preview.moving);
-            job = moving.compute(app, &cmds, colors);
-            app.preview.moving = moving;
+        let mut job = None;
+        if !part_editor {
+            let mut straight = std::mem::take(&mut app.preview.straight);
+            job = straight.compute(app, &cmds, colors);
+            app.preview.straight = straight;
+            if job.is_none() {
+                let mut moving = std::mem::take(&mut app.preview.moving);
+                job = moving.compute(app, &cmds, colors);
+                app.preview.moving = moving;
+            }
         }
         if let Some(job) = job {
             app.preview.apply(key, job);
@@ -411,7 +419,15 @@ pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
             return;
         }
         let scratch = app.session.scratch();
-        spawn(&mut app.preview, key, scratch, cmds, colors, tool, Arc::new(Progress::default()));
+        let editing = app.editing_state.as_ref().filter(|_| part_editor).map(|state| {
+            let selected = crate::documents::component_view_scope_for(app, &state.original)
+                .and_then(|(component, body)| body.map(|body| (component, body)));
+            PartEditorPreview {
+                source: state.source.scratch(), original: state.original.scratch(), selected,
+                path: crate::documents::component_view_path(app).map(<[u64]>::to_vec),
+            }
+        });
+        spawn(&mut app.preview, key, scratch, cmds, colors, tool, editing, Arc::new(Progress::default()));
     }
     app.preview.busy = app.preview.running.is_some();
     if app.preview.busy {
@@ -430,14 +446,22 @@ fn job_key(cmds: &[(String, Value)], revision: u64, colors: Colors) -> u64 {
 }
 
 /// Start computing the preview of `cmds`: for a tool feature (`tool`), only its tool.
+struct PartEditorPreview {
+    source: Session,
+    original: Session,
+    selected: Option<(u64, String)>,
+    path: Option<Vec<u64>>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn(pv: &mut PreviewState, key: u64, scratch: Session, cmds: Vec<(String, Value)>, colors: Colors, tool: bool, progress: Arc<Progress>) {
+fn spawn(pv: &mut PreviewState, key: u64, scratch: Session, cmds: Vec<(String, Value)>, colors: Colors, tool: bool, editing: Option<PartEditorPreview>, progress: Arc<Progress>) {
     let (tx, rx) = std::sync::mpsc::channel();
     // Watched by `progress`, so a job left behind for other inputs skips its remaining features.
     let watched = progress.clone();
     let spawned = std::thread::Builder::new().name("preview".into()).spawn(move || {
         let job = solidcraft_engine::doc::progress::watch(watched, || {
-            if tool { compute_tool(&scratch, &cmds, colors) } else { compute(&scratch, &cmds, colors) }
+            if let Some(editing) = editing { compute_part_editor(scratch, &cmds, colors, editing) }
+            else if tool { compute_tool(&scratch, &cmds, colors) } else { compute(&scratch, &cmds, colors) }
         });
         let _ = tx.send(job);
     });
@@ -453,8 +477,51 @@ fn spawn(pv: &mut PreviewState, key: u64, scratch: Session, cmds: Vec<(String, V
 
 /// No threads on the web: compute right away.
 #[cfg(target_arch = "wasm32")]
-fn spawn(pv: &mut PreviewState, key: u64, scratch: Session, cmds: Vec<(String, Value)>, colors: Colors, tool: bool, _progress: Arc<Progress>) {
-    pv.apply(key, if tool { compute_tool(&scratch, &cmds, colors) } else { compute(&scratch, &cmds, colors) });
+fn spawn(pv: &mut PreviewState, key: u64, scratch: Session, cmds: Vec<(String, Value)>, colors: Colors, tool: bool, editing: Option<PartEditorPreview>, _progress: Arc<Progress>) {
+    pv.apply(key, if let Some(editing) = editing { compute_part_editor(scratch, &cmds, colors, editing) } else if tool { compute_tool(&scratch, &cmds, colors) } else { compute(&scratch, &cmds, colors) });
+}
+
+/// Evaluate the same complete guarded edit as the final apply, but adopt it only on scratch.
+fn compute_part_editor(scratch: Session, cmds: &[(String, Value)], colors: Colors, editing: PartEditorPreview) -> Job {
+    let PartEditorPreview { source, original, selected, path } = editing;
+    let (component, definition) = selected.ok_or("the selected part is no longer available")?;
+    let path = path.ok_or("the selected placement is no longer available")?;
+    // Track the producer's body slot across an edit that renames the selected body.
+    let body = original.model.state().body(&definition).cloned().ok_or("the selected part is no longer available")?;
+    let feature = original.doc.feature(body.feature).ok_or("the selected part is no longer available")?;
+    let result = original.model.result(body.feature).ok_or("the selected part is no longer available")?;
+    let made: Vec<_> = result.state.bodies.iter().filter(|candidate| candidate.feature == body.feature).collect();
+    let slot = made.iter().zip(feature.body_name_slots(made.len()))
+        .find_map(|(candidate, slot)| (candidate.name == definition).then_some(slot))
+        .ok_or("the selected part is no longer available")?;
+    let before = selected_world(&original, &path, component, &definition)?;
+    let mut target = scratch.scratch();
+    let prepared = scratch.compute_editor_commands(cmds, &source, original).map_err(|error| error.to_string())?;
+    target.accept_commands(prepared).map_err(|error| error.to_string())?;
+    let feature = target.doc.feature(body.feature).ok_or("the selected part is no longer available")?;
+    let result = target.model.result(body.feature).ok_or("the selected part is no longer available")?;
+    let made: Vec<_> = result.state.bodies.iter().filter(|candidate| candidate.feature == body.feature).collect();
+    let after_name = made.iter().zip(feature.body_name_slots(made.len()))
+        .find_map(|(candidate, candidate_slot)| (candidate_slot == slot).then_some(candidate.name.clone()))
+        .ok_or("the selected part is no longer available")?;
+    let after = selected_world(&target, &path, component, &after_name)?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut result = build(&before, &after, colors);
+        result.bounds = state_bounds(&after);
+        result
+    })).map_err(|_| "the preview failed".to_string())
+}
+
+/// Only the chosen body in the chosen occurrence is visible in an individual-part view.
+fn selected_world(session: &Session, path: &[u64], component: u64, definition: &str) -> Result<ModelState, String> {
+    let names = session.occurrence_bodies_shared(path, true).map_err(|error| error.to_string())?;
+    let world = session.world_state();
+    let mut state = (*world).clone();
+    state.bodies.retain(|body| names.iter().any(|name| name == &body.name)
+        && body.component == component && body.definition_name() == definition && session.body_visible(&body.name));
+    state.sketches.clear();
+    state.construct.clear();
+    Ok(state)
 }
 
 /// Evaluate the commands on the scratch session and build the preview scene.

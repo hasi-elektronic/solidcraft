@@ -46,9 +46,9 @@ impl SolveApp {
         let quality = solidcraft_engine::doc::display_quality::DisplayQuality::parse(&self.preferences.display_quality).unwrap_or_default();
         let compute = move || {
             let params = marker.map(|position| serde_json::json!({"position": position})).unwrap_or_else(|| serde_json::json!({}));
-            original.execute("timeline.roll_to", &params).map_err(|error| error.to_string())?;
+            original.execute_part_editor_marker(&params).map_err(|error| error.to_string())?;
             let mut rolled = original.scratch();
-            rolled.execute("timeline.roll_to", &serde_json::json!({"position": index})).map_err(|error| error.to_string())?;
+            rolled.execute_part_editor_marker(&serde_json::json!({"position": index})).map_err(|error| error.to_string())?;
             original.world_state().warm_display_at(quality, || true);
             rolled.world_state().warm_display_at(quality, || true);
             Ok((original, rolled))

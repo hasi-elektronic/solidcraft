@@ -215,7 +215,7 @@ impl Server {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false}},
-                    "serverInfo": {"name": "solidcraft", "title": "SolidCraft", "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": solidcraft_engine::product::PRODUCT.xdg_folder, "title": solidcraft_engine::product::PRODUCT.name, "version": solidcraft_engine::product::PRODUCT.version},
                     "instructions": format!("{INSTRUCTIONS} Backend: {}.", self.backend.describe()),
                 }))
             }

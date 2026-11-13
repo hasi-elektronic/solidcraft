@@ -164,6 +164,9 @@ fn style(ctx: &egui::Context, c: &PointCloud, playing: impl Fn(usize) -> Option<
 
 /// The shown point clouds as the GPU draws them.
 pub fn gpu_clouds(app: &SolveApp, ctx: &egui::Context) -> Vec<GpuCloud> {
+    if crate::documents::component_view_active(app) {
+        return Vec::new();
+    }
     let doc = &app.session.doc;
     EXTENTS.with(|e| e.borrow_mut().retain(|id, _| doc.point_clouds.iter().any(|c| c.id == *id)));
     RECORDS.with(|m| {
@@ -193,7 +196,7 @@ pub fn gpu_clouds(app: &SolveApp, ctx: &egui::Context) -> Vec<GpuCloud> {
 
 /// CPU viewport only: some of each shown cloud's points over the rendered model.
 pub fn show(app: &SolveApp, painter: &Painter, proj: &Proj) {
-    if app.viewport.gpu.is_some() {
+    if app.viewport.gpu.is_some() || crate::documents::component_view_active(app) {
         return;
     }
     let clouds: Vec<&PointCloud> = solidcraft_engine::view::shown_point_clouds(&app.session).collect();

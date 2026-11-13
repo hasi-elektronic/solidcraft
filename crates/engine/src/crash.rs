@@ -135,7 +135,12 @@ pub fn default_dir() -> Option<PathBuf> {
     if cfg!(test) {
         return Some(std::env::temp_dir().join(format!("solidcraft-test-crashes-{}", std::process::id())));
     }
-    if let Some(d) = solidcraft_geom::env::var_os("CRASH_DIR").filter(|d| !d.is_empty()) {
+    let override_dir = if crate::product::PRODUCT.branded {
+        std::env::var_os(format!("{}_CRASH_DIR", crate::product::PRODUCT.name.to_ascii_uppercase()))
+    } else {
+        solidcraft_geom::env::var_os("CRASH_DIR")
+    };
+    if let Some(d) = override_dir.filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(d));
     }
     crate::recovery::default_dir().and_then(|d| d.parent().map(|p| p.join("crashes")))

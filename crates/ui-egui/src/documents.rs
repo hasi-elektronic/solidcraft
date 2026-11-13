@@ -18,7 +18,7 @@ use crate::ui_kit;
 /// Continue transient shot queues without adopting their document or view into the active tab.
 pub(crate) fn advance_render_batches(app: &mut SolveApp, ctx: &egui::Context) {
     let mut error = None;
-    for slot in app.docs.slots.iter_mut().flatten() {
+    for slot in app.docs.slots.iter_mut().flatten().filter(|slot| !slot.placeholder) {
         if let Err(failure) = slot.session.advance_render_batch() {
             error = Some(failure.to_string());
         }
@@ -38,6 +38,12 @@ pub const MAX_OPEN: usize = 32;
 /// A design that is not the active one: everything that belongs to it alone.
 pub struct DocSlot {
     pub(crate) session: Session,
+    /// A component view shares its owner's live session. Other slots of that owner carry only
+    /// a placeholder until the live session is moved into them.
+    focus: Option<ComponentView>,
+    placeholder: bool,
+    active_component: u64,
+    active_occurrence_path: Option<Vec<u64>>,
     pub(crate) autosave: Option<solidcraft_engine::recovery::Autosaver>,
     pub(crate) big_operation: bool,
     cam: Camera,
@@ -52,6 +58,34 @@ pub struct DocSlot {
     edit_in_place: Option<crate::edit_in_place::PartContext>,
     /// The dialog or tool it had open and its toolbar tab, kept while another design is shown.
     work: DocWork,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ComponentView {
+    owner: u64,
+    component: u64,
+    path: Vec<u64>,
+    name: String,
+    /// A selected body's durable producer and skip-aware slot, not its mutable label.
+    body: Option<BodyView>,
+    body_cache: std::sync::Arc<std::sync::Mutex<Option<(std::sync::Arc<[String]>, std::collections::HashSet<String>)>>>,
+}
+
+#[derive(Clone, Debug)]
+struct BodyView {
+    component: u64,
+    feature: u64,
+    slot: usize,
+    resolved: std::sync::Arc<std::sync::Mutex<Option<BodyResolution>>>,
+}
+
+#[derive(Clone, Debug)]
+struct BodyResolution {
+    document: std::sync::Arc<solidcraft_engine::doc::Document>,
+    state: std::sync::Arc<solidcraft_engine::doc::ModelState>,
+    name: Option<String>,
+    features: std::collections::HashSet<u64>,
+    editable_features: std::collections::HashSet<u64>,
 }
 
 /// What a design was doing when its tab was left, with the "Keep dialogs and tools open when
@@ -106,7 +140,7 @@ fn put_work(app: &mut SolveApp, mut work: DocWork, before: u64) {
         }
         None => {
             app.ui.ribbon_context = None;
-            app.ui.tab = "MODEL".into();
+            app.ui.tab = if solidcraft_engine::product::PRODUCT.branded { "SHEET METAL" } else { "MODEL" }.into();
         }
     }
     crate::workspace::sync_context(app);
@@ -130,7 +164,11 @@ struct DocView {
 impl DocSlot {
     fn new(session: Session) -> DocSlot {
         DocSlot {
+            active_component: session.active_component,
+            active_occurrence_path: session.active_occurrence_path.clone(),
             session,
+            focus: None,
+            placeholder: false,
             autosave: None,
             big_operation: false,
             cam: Camera::default(),
@@ -152,6 +190,7 @@ impl DocSlot {
 pub struct Documents {
     slots: Vec<Option<DocSlot>>,
     pub active: usize,
+    active_focus: Option<ComponentView>,
     /// A tab waiting for the answer to "save changes?".
     pub closing: Option<usize>,
     /// Quitting: the tabs answered so far with Don't Save (`None`: not quitting).
@@ -173,12 +212,12 @@ pub struct Documents {
 
 impl Documents {
     pub(crate) fn background_mut(&mut self) -> impl Iterator<Item = &mut DocSlot> {
-        self.slots.iter_mut().filter_map(Option::as_mut)
+        self.slots.iter_mut().filter_map(Option::as_mut).filter(|s| !s.placeholder)
     }
 
     /// The designs in the tabs not shown.
     pub(crate) fn background(&self) -> impl Iterator<Item = &Session> {
-        self.slots.iter().filter_map(Option::as_ref).map(|slot| &slot.session)
+        self.slots.iter().filter_map(Option::as_ref).filter(|s| !s.placeholder).map(|slot| &slot.session)
     }
 
     /// Number of open designs (at least the active one).
@@ -235,6 +274,10 @@ fn swap_in(app: &mut SolveApp, mut slot: DocSlot) -> DocSlot {
     // A click's point means nothing in the other design.
     app.edit_anchor_hint = None;
     let mut out = DocSlot {
+        focus: app.docs.active_focus.take(),
+        placeholder: false,
+        active_component: app.session.active_component,
+        active_occurrence_path: app.session.active_occurrence_path.clone(),
         session: std::mem::replace(&mut app.session, slot.session),
         autosave: app.autosave.as_mut().and_then(|a| std::mem::replace(&mut a.active, slot.autosave)),
         big_operation: std::mem::replace(&mut app.big_operation, slot.big_operation),
@@ -252,6 +295,9 @@ fn swap_in(app: &mut SolveApp, mut slot: DocSlot) -> DocSlot {
     // Only the displayed design owns the process-wide crash replay journal.
     app.session.crash_journal = out.session.crash_journal;
     out.session.crash_journal = false;
+    app.docs.active_focus = slot.focus;
+    app.session.active_component = slot.active_component;
+    app.session.active_occurrence_path = slot.active_occurrence_path;
     put_view(app, slot.view);
     // Components picked in the browser are the outgoing design's: Copy must not copy them here.
     app.tree.picked_components.clear();
@@ -303,18 +349,93 @@ pub fn switch(app: &mut SolveApp, i: usize) {
     if i == app.docs.active || i >= app.docs.slots.len() {
         return;
     }
-    let Some(incoming) = app.docs.slots.get_mut(i).and_then(Option::take) else { return };
+    let active_shared = app.docs.active_focus.is_some()
+        || app.docs.slots.iter().flatten().any(|slot| slot.focus.as_ref().is_some_and(|v| v.owner == app.session.uid));
+    let incoming_shared = app.docs.slots.get(i).and_then(Option::as_ref).is_some_and(|slot| slot.focus.is_some() || slot.placeholder);
+    if (active_shared || incoming_shared)
+        && let Err(why) = crate::edit_in_place::check_activity(app)
+    {
+        app.set_status(why, true);
+        return;
+    }
+    if (active_shared || incoming_shared) && app.agent_chat.state() == crate::agent_chat::State::Busy {
+        app.set_status(crate::i18n::tr("ui.edit_in_place_agent_busy").to_string(), true);
+        return;
+    }
     crate::linked_source::note_unread(app);
-    let out = swap_in(app, incoming);
+    let Some(mut incoming) = app.docs.slots.get_mut(i).and_then(Option::take) else { return };
+    let source_component = app.session.active_component;
+    let source_path = app.session.active_occurrence_path.clone();
+    let source_journal = app.session.crash_journal;
+    let same_owner = incoming.placeholder && incoming.session.uid == app.session.uid;
+    let mut donor_index = None;
+    if same_owner {
+        // Move the one real session and its recovery state, never clone an undo history.
+        std::mem::swap(&mut incoming.session, &mut app.session);
+        if let Some(autosave) = app.autosave.as_mut() {
+            std::mem::swap(&mut incoming.autosave, &mut autosave.active);
+        }
+        std::mem::swap(&mut incoming.link_stamps, &mut app.docs.link_stamps);
+        incoming.placeholder = false;
+    } else if incoming.placeholder {
+        let owner = incoming.session.uid;
+        let Some(index) = app.docs.slots.iter().position(|slot| slot.as_ref().is_some_and(|s| s.session.uid == owner && !s.placeholder)) else {
+            app.docs.slots[i] = Some(incoming);
+            app.set_status(app.tr("ui.open_part_unsupported").to_string(), true);
+            return;
+        };
+        let Some(donor) = app.docs.slots.get_mut(index).and_then(Option::as_mut) else { return };
+        std::mem::swap(&mut incoming.session, &mut donor.session);
+        std::mem::swap(&mut incoming.autosave, &mut donor.autosave);
+        std::mem::swap(&mut incoming.link_stamps, &mut donor.link_stamps);
+        donor.placeholder = true;
+        incoming.placeholder = false;
+        donor_index = Some(index);
+    }
+    if let Some(focus) = &incoming.focus {
+        let valid = incoming.session.doc.components.iter().any(|c| c.id == focus.component)
+            && incoming.session.occurrence_placement(&focus.path).is_ok_and(|p| p.component == focus.component);
+        if !valid {
+            // A stale view cannot silently edit another placement.
+            if same_owner {
+                std::mem::swap(&mut incoming.session, &mut app.session);
+                if let Some(autosave) = app.autosave.as_mut() {
+                    std::mem::swap(&mut incoming.autosave, &mut autosave.active);
+                }
+                std::mem::swap(&mut incoming.link_stamps, &mut app.docs.link_stamps);
+                incoming.placeholder = true;
+            } else if let Some(donor) = donor_index.and_then(|index| app.docs.slots.get_mut(index)).and_then(Option::as_mut) {
+                std::mem::swap(&mut incoming.session, &mut donor.session);
+                std::mem::swap(&mut incoming.autosave, &mut donor.autosave);
+                std::mem::swap(&mut incoming.link_stamps, &mut donor.link_stamps);
+                donor.placeholder = false;
+                incoming.placeholder = true;
+            }
+            app.docs.slots[i] = Some(incoming);
+            app.set_status(app.tr("ui.open_part_unsupported").to_string(), true);
+            return;
+        }
+    }
+    let missing_body = incoming.focus.as_ref().and_then(|focus| focus.body.as_ref()).is_some_and(|body| body.definition(&incoming.session).is_none());
+    let mut out = swap_in(app, incoming);
+    out.placeholder = same_owner;
+    out.active_component = source_component;
+    out.active_occurrence_path = source_path;
+    if same_owner {
+        app.session.crash_journal = source_journal;
+        app.session.selection.clear();
+    }
     let a = app.docs.active;
     if let Some(s) = app.docs.slots.get_mut(a) {
         *s = Some(out);
     }
     app.docs.active = i;
+    sync_component_view_scope(app);
     // Closing several tabs, quitting, or a "save changes?" for this tab goes through them, and a
     // save then must not wait for a read: what they missed waits for their return.
     // An assembly reading its links for a part edited in place takes them all up once it is done.
-    if app.docs.batch.is_none()
+    if !same_owner
+        && app.docs.batch.is_none()
         && app.docs.quitting.is_none()
         && app.docs.closing.is_none()
         && crate::edit_in_place::refreshing_assembly(app).is_none()
@@ -322,6 +443,9 @@ pub fn switch(app: &mut SolveApp, i: usize) {
         crate::linked_source::update_changed(app);
     }
     crate::edit_in_place::attach(app);
+    if missing_body {
+        app.set_status(app.tr("ui.part_view_missing").to_string(), true);
+    }
 }
 
 /// Show the next design tab (`forward`) or the previous one, going round from the last to the
@@ -342,7 +466,7 @@ pub(crate) fn session_at<'a>(app: &'a SolveApp, path: &str) -> Option<&'a Sessio
     if saved_at(&app.session) {
         return Some(&app.session);
     }
-    app.docs.slots.iter().flatten().map(|s| &s.session).find(|s| saved_at(s))
+    app.docs.slots.iter().flatten().filter(|s| !s.placeholder).map(|s| &s.session).find(|s| saved_at(s))
 }
 
 /// Every edit in place: of the tab shown, and of the tabs in the background.
@@ -373,7 +497,7 @@ pub(crate) fn session_at_mut<'a>(app: &'a mut SolveApp, path: &str) -> Option<&'
     if saved_at(&app.session) {
         return Some(&mut app.session);
     }
-    app.docs.slots.iter_mut().flatten().map(|s| &mut s.session).find(|s| saved_at(s))
+    app.docs.slots.iter_mut().flatten().filter(|s| !s.placeholder).map(|s| &mut s.session).find(|s| saved_at(s))
 }
 
 /// Select an already-open saved design without reloading or framing it. Identity is derived
@@ -428,7 +552,19 @@ pub fn open_tab(app: &mut SolveApp, session: Session) -> Result<(), String> {
         app.docs.slots.push(None);
         app.docs.active = 0;
     }
-    if app.docs.slots.len() >= MAX_OPEN {
+    // Component views are tabs, not extra designs: they share their owner's session.
+    let designs = app
+        .docs
+        .slots
+        .iter()
+        .enumerate()
+        .filter(
+            |(index, slot)| {
+                if *index == app.docs.active { app.docs.active_focus.is_none() } else { slot.as_ref().is_some_and(|slot| slot.focus.is_none()) }
+            },
+        )
+        .count();
+    if designs >= MAX_OPEN {
         return Err(format!("at most {MAX_OPEN} designs can be open"));
     }
     let at = app.docs.active + 1;
@@ -436,6 +572,334 @@ pub fn open_tab(app: &mut SolveApp, session: Session) -> Result<(), String> {
     crate::agent_chat::follow_new_tab(app, |app| switch(app, at));
     app.fit_view();
     Ok(())
+}
+
+/// Capture the selected body's producer and stable output slot. STEP imports can contain
+/// several bodies with identical source labels; the evaluator's unique definition names and
+/// skip-aware slots distinguish them without relying on the raw STEP label.
+fn body_view(session: &Session, component: u64, path: &[u64], name: &str) -> Result<BodyView, String> {
+    let invalid = || crate::i18n::tr("ui.open_part_unsupported").to_string();
+    let names = session.occurrence_bodies_shared(path, true).map_err(|_| invalid())?;
+    if !names.iter().any(|candidate| candidate == name) {
+        return Err(invalid());
+    }
+    let world = session.world_state();
+    let selected = world.body(name).filter(|body| body.component == component).ok_or_else(invalid)?;
+    let feature = session.doc.feature(selected.feature).ok_or_else(invalid)?;
+    let result = session.model.result(selected.feature).filter(|r| !r.skipped && !r.stale && r.error.is_none()).ok_or_else(invalid)?;
+    let made: Vec<_> = result.state.bodies.iter().filter(|body| body.feature == selected.feature).collect();
+    let slots = feature.body_name_slots(made.len());
+    let matches: Vec<_> = made.iter().zip(slots).filter(|(body, _)| body.name == selected.definition_name()).map(|(_, slot)| slot).collect();
+    let [slot] = matches.as_slice() else { return Err(invalid()) };
+    Ok(BodyView { component, feature: selected.feature, slot: *slot, resolved: Default::default() })
+}
+
+/// The already-evaluated step must change the selected body and leave every other body exactly
+/// as it was. Pointer-backed `Body::same` deliberately errs on the side of refusing an edit
+/// if a rebuild cannot prove that a sibling stayed unchanged.
+fn exclusive_body_step(before: &solidcraft_engine::doc::ModelState, after: &solidcraft_engine::doc::ModelState, selected: &str) -> bool {
+    let old: std::collections::HashMap<_, _> = before.bodies.iter().map(|body| (body.name.as_str(), body)).collect();
+    let new: std::collections::HashMap<_, _> = after.bodies.iter().map(|body| (body.name.as_str(), body)).collect();
+    let Some(target) = new.get(selected) else { return false };
+    let unchanged = |a: &solidcraft_engine::doc::ModelBody, b: &solidcraft_engine::doc::ModelBody| {
+        a.component == b.component
+            && a.transferred == b.transferred
+            && a.source_name == b.source_name
+            && a.source_transform == b.source_transform
+            && a.body.same(&b.body)
+    };
+    if old.get(selected).is_some_and(|previous| unchanged(previous, target)) {
+        return false;
+    }
+    old.iter().filter(|(name, _)| **name != selected).all(|(name, body)| new.get(name).is_some_and(|other| unchanged(body, other)))
+        && new.keys().filter(|name| **name != selected).all(|name| old.contains_key(name))
+}
+
+impl BodyView {
+    /// Resolve renames through the producing feature's slot. Every evaluated step must retain
+    /// that name: deleting it and later creating a different body with the same name must not
+    /// silently make an old tab display or edit the new body.
+    fn definition(&self, session: &Session) -> Option<String> {
+        let state = session.model.state();
+        let document = session.doc.clone();
+        let mut cache = self.resolved.lock().ok()?;
+        if let Some(cached) =
+            cache.as_ref().filter(|cached| std::sync::Arc::ptr_eq(&cached.state, &state) && std::sync::Arc::ptr_eq(&cached.document, &document))
+        {
+            return cached.name.clone();
+        }
+        let resolve = || {
+            let feature = document.feature(self.feature)?;
+            let index = session.model.results.iter().position(|result| result.id == self.feature)?;
+            let result = session.model.results.get(index).filter(|r| !r.skipped && !r.stale && r.error.is_none())?;
+            let made: Vec<_> = result.state.bodies.iter().filter(|body| body.feature == self.feature).collect();
+            let name =
+                made.iter().zip(feature.body_name_slots(made.len())).find_map(|(body, slot)| (slot == self.slot).then_some(body.name.clone()))?;
+            if !session.model.results.iter().skip(index).filter(|r| !r.skipped).all(|r| r.state.body(&name).is_some()) || state.body(&name).is_none()
+            {
+                return None;
+            }
+            Some(name)
+        };
+        let name = resolve();
+        let mut features = std::collections::HashSet::new();
+        let mut editable_features = std::collections::HashSet::new();
+        if let Some(definition) = &name {
+            let by_id: std::collections::HashMap<_, _> = document.features.iter().map(|feature| (feature.id, feature)).collect();
+            for candidate in &document.features {
+                if candidate.id == self.feature || candidate.kind.input_bodies().iter().any(|body| body == definition) {
+                    features.insert(candidate.id);
+                    features.extend(candidate.kind.input_sketches());
+                }
+            }
+            if let Some(first) = session.model.results.first() {
+                let mut before = session.model.state_before(first.id);
+                for result in &session.model.results {
+                    if !result.skipped
+                        && !result.stale
+                        && result.error.is_none()
+                        && let Some(candidate) = by_id.get(&result.id)
+                        && candidate.component == self.component
+                        && !matches!(candidate.kind, solidcraft_engine::doc::FeatureKind::Sketch { .. })
+                        && candidate.kind.input_bodies().iter().all(|body| body == definition)
+                        && candidate.participants.iter().all(|body| body == definition)
+                        && exclusive_body_step(&before, &result.state, definition)
+                    {
+                        editable_features.insert(result.id);
+                    }
+                    if !result.skipped {
+                        before = result.state.clone();
+                    }
+                }
+            }
+            // Invert each feature's sketch, feature-id and feature-name references once. A
+            // sketch becomes editable only when all of its consumers are proven exclusive.
+            // Propagating that proof backwards handles sketches used by other sketches without
+            // scanning the whole design once per sketch; ambiguous cycles remain read-only.
+            let sketches: Vec<_> = document
+                .features
+                .iter()
+                .filter(|feature| feature.component == self.component && matches!(feature.kind, solidcraft_engine::doc::FeatureKind::Sketch { .. }))
+                .collect();
+            let mut users: std::collections::HashMap<u64, std::collections::HashSet<u64>> =
+                sketches.iter().map(|sketch| (sketch.id, Default::default())).collect();
+            let mut by_name: std::collections::HashMap<&str, Vec<u64>> = Default::default();
+            for sketch in &sketches {
+                by_name.entry(sketch.name.as_str()).or_default().push(sketch.id);
+            }
+            for candidate in &document.features {
+                let (ids, names) = candidate.kind.input_feature_refs();
+                for id in candidate.kind.input_sketches().into_iter().chain(ids) {
+                    if let Some(consumers) = users.get_mut(&id) {
+                        consumers.insert(candidate.id);
+                    }
+                }
+                for name in names {
+                    for id in by_name.get(name.as_str()).into_iter().flatten() {
+                        if let Some(consumers) = users.get_mut(id) {
+                            consumers.insert(candidate.id);
+                        }
+                    }
+                }
+            }
+            let mut pending = std::collections::HashMap::new();
+            let mut dependents: std::collections::HashMap<u64, Vec<u64>> = Default::default();
+            let mut ready = Vec::new();
+            for (sketch, consumers) in users {
+                if consumers.is_empty() {
+                    continue;
+                }
+                let mut remaining = 0_usize;
+                for consumer in consumers {
+                    if !editable_features.contains(&consumer) {
+                        remaining += 1;
+                        dependents.entry(consumer).or_default().push(sketch);
+                    }
+                }
+                if remaining == 0 {
+                    ready.push(sketch);
+                }
+                pending.insert(sketch, remaining);
+            }
+            while let Some(sketch) = ready.pop() {
+                if !editable_features.insert(sketch) {
+                    continue;
+                }
+                for parent in dependents.get(&sketch).into_iter().flatten() {
+                    if let Some(remaining) = pending.get_mut(parent) {
+                        *remaining = remaining.saturating_sub(1);
+                        if *remaining == 0 {
+                            ready.push(*parent);
+                        }
+                    }
+                }
+            }
+            features.extend(editable_features.iter().copied());
+        }
+        *cache = Some(BodyResolution { document, state, name: name.clone(), features, editable_features });
+        name
+    }
+
+    fn includes_feature(&self, session: &Session, feature: u64) -> bool {
+        if self.definition(session).is_none() {
+            return false;
+        }
+        self.resolved.lock().ok().and_then(|cache| cache.as_ref().map(|value| value.features.contains(&feature))).unwrap_or(false)
+    }
+
+    fn feature_editable(&self, session: &Session, feature: u64) -> bool {
+        if self.definition(session).is_none() {
+            return false;
+        }
+        self.resolved.lock().ok().and_then(|cache| cache.as_ref().map(|value| value.editable_features.contains(&feature))).unwrap_or(false)
+    }
+}
+
+/// Open a view of a component in the current assembly. The assembly's one live session moves
+/// with the selected tab; no source design is written or replaced.
+pub(crate) fn open_component_view(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>, body: Option<String>) -> Result<(), String> {
+    crate::edit_in_place::check_activity(app)?;
+    if !app.session.pending_moves.is_empty() {
+        return Err(crate::i18n::tr("ui.open_part_finish_first").to_string());
+    }
+    let component_name = app
+        .session
+        .doc
+        .components
+        .iter()
+        .find(|c| c.id == component)
+        .map(|c| c.name.clone())
+        .ok_or_else(|| crate::i18n::tr("ui.open_part_unsupported").to_string())?;
+    let path = path.unwrap_or_else(|| app.session.doc.first_path(component));
+    if app.session.occurrence_placement(&path).map_err(|e| e.to_string())?.component != component {
+        return Err(crate::i18n::tr("ui.open_part_unsupported").to_string());
+    }
+    let selected = body.as_deref().map(|name| body_view(&app.session, component, &path, name)).transpose()?;
+    let name = body.unwrap_or(component_name);
+    if app.docs.slots.is_empty() {
+        app.docs.slots.push(None);
+        app.docs.active = 0;
+    }
+    let owner = app.session.uid;
+    // Only one tab owns the real session. A placeholder needs the owner's identity and title,
+    // not a clone of the evaluated model and its caches for every open part.
+    let mut placeholder = Session::default();
+    placeholder.uid = owner;
+    placeholder.doc = app.session.doc.clone();
+    let mut slot = DocSlot::new(placeholder);
+    slot.focus = Some(ComponentView { owner, component, path: path.clone(), name, body: selected, body_cache: Default::default() });
+    slot.placeholder = true;
+    slot.active_component = component;
+    slot.active_occurrence_path = Some(path);
+    let at = app.docs.active + 1;
+    app.docs.slots.insert(at, Some(slot));
+    switch(app, at);
+    if app.docs.active != at {
+        app.docs.slots.remove(at);
+        return Err(crate::i18n::tr("ui.open_part_unsupported").to_string());
+    }
+    app.fit_view();
+    Ok(())
+}
+
+/// Whether an actual body belongs to the focused placement (a view, never saved visibility).
+pub(crate) fn component_view_body(app: &SolveApp, name: &str) -> Option<bool> {
+    let view = app.docs.active_focus.as_ref()?;
+    if view.owner != app.session.uid {
+        return Some(false);
+    }
+    let Ok(names) = app.session.occurrence_bodies_shared(&view.path, true) else { return Some(false) };
+    let Ok(mut cache) = view.body_cache.lock() else { return Some(false) };
+    if cache.as_ref().is_none_or(|(previous, _)| !std::sync::Arc::ptr_eq(previous, &names)) {
+        *cache = Some((names.clone(), names.iter().cloned().collect()));
+    }
+    let in_placement = cache.as_ref().is_some_and(|(_, names)| names.contains(name));
+    let Some(selected) = &view.body else { return Some(in_placement) };
+    if !in_placement {
+        return Some(false);
+    }
+    let Some(definition) = selected.definition(&app.session) else { return Some(false) };
+    let world = app.session.world_state();
+    Some(world.body(name).is_some_and(|body| body.component == view.component && body.definition_name() == definition))
+}
+
+pub(crate) fn component_view_active(app: &SolveApp) -> bool {
+    app.docs.active_focus.as_ref().is_some_and(|view| view.owner == app.session.uid)
+}
+
+/// A body view remains a body view even when its source body was deleted; callers must not
+/// fall back to displaying the rest of the component in that case.
+pub(crate) fn component_view_has_body(app: &SolveApp) -> bool {
+    app.docs.active_focus.as_ref().is_some_and(|view| view.owner == app.session.uid && view.body.is_some())
+}
+
+/// The selected definition name for a body edit guard. `Some((component, None))` means that
+/// the body is no longer resolvable and edits must be refused, not broadened to the component.
+pub(crate) fn component_view_scope(app: &SolveApp) -> Option<(u64, Option<String>)> {
+    component_view_scope_for(app, &app.session)
+}
+
+/// Resolve a body view against the pinned complete session while an editor is rolled back.
+pub(crate) fn component_view_scope_for(app: &SolveApp, session: &Session) -> Option<(u64, Option<String>)> {
+    let view = app.docs.active_focus.as_ref().filter(|view| view.owner == app.session.uid)?;
+    let body = view.body.as_ref()?;
+    Some((view.component, body.definition(session)))
+}
+
+/// Re-resolve the non-persistent engine boundary when selecting a tab or after body renames,
+/// undo, redo and feature edits. Missing identities deliberately use the engine's fail-closed
+/// empty name rather than broadening an individual-body edit to its whole component.
+pub(crate) fn sync_component_view_scope(app: &mut SolveApp) {
+    // Feature and sketch editors temporarily roll the history marker back and may hide the producer.
+    // Keep its prior guard until the pinned source is restored or the edit is adopted.
+    if app.docs.active_focus.as_ref().is_some_and(|view| view.body.is_some())
+        && (app.editing_state.is_some() || app.pending_feature_edit.is_some() || app.session.sketch_restore_marker().is_some())
+    {
+        return;
+    }
+    let scope = component_view_scope(app).map(|(component, body)| (component, body.unwrap_or_default()));
+    app.session.set_part_edit_scope(scope);
+}
+
+/// Resolve the selected body's current world name at the selected occurrence. A missing or
+/// ambiguous body has no match, rather than choosing another component's body by name.
+pub(crate) fn component_view_selected_body(app: &SolveApp) -> Option<String> {
+    let view = app.docs.active_focus.as_ref().filter(|view| view.owner == app.session.uid)?;
+    let selected = view.body.as_ref()?;
+    let definition = selected.definition(&app.session)?;
+    let names = app.session.occurrence_bodies_shared(&view.path, true).ok()?;
+    let world = app.session.world_state();
+    let matches: Vec<_> = names
+        .iter()
+        .filter(|name| world.body(name).is_some_and(|body| body.component == view.component && body.definition_name() == definition))
+        .collect();
+    let [name] = matches.as_slice() else { return None };
+    Some((*name).clone())
+}
+
+pub(crate) fn component_view_path(app: &SolveApp) -> Option<&[u64]> {
+    app.docs.active_focus.as_ref().filter(|view| view.owner == app.session.uid).map(|view| view.path.as_slice())
+}
+
+pub(crate) fn component_view_feature(app: &SolveApp, id: u64) -> bool {
+    let Some(view) = app.docs.active_focus.as_ref() else { return true };
+    let Some(feature) = app.session.doc.feature(id) else { return false };
+    if !app.session.doc.component_within(feature.component, view.component) {
+        return false;
+    }
+    let Some(selected) = &view.body else { return true };
+    if app.session.active_sketch == Some(id) {
+        return true;
+    }
+    selected.includes_feature(&app.session, id)
+}
+
+/// In an individual-body view, only timeline features proven to affect that body alone are
+/// editable. Shared imports, shared sketches and ambiguous operations remain read-only.
+pub(crate) fn component_view_feature_editable(app: &SolveApp, id: u64) -> bool {
+    let Some(view) = app.docs.active_focus.as_ref().filter(|view| view.owner == app.session.uid) else { return true };
+    let Some(body) = &view.body else { return true };
+    body.feature_editable(&app.session, id)
 }
 
 /// Is the active design an untouched new one (it can be replaced instead of opening a tab)?
@@ -530,6 +994,101 @@ pub fn close(app: &mut SolveApp, i: usize, force: bool) {
     if i >= n {
         return;
     }
+    let focus = if i == app.docs.active {
+        app.docs.active_focus.clone()
+    } else {
+        app.docs.slots.get(i).and_then(Option::as_ref).and_then(|s| s.focus.clone())
+    };
+    if let Some(view) = focus {
+        let owner = app
+            .docs
+            .slots
+            .iter()
+            .enumerate()
+            .find_map(|(index, slot)| {
+                (index != i && slot.as_ref().is_some_and(|s| s.focus.is_none() && s.session.uid == view.owner)).then_some(index)
+            })
+            .or_else(|| (app.docs.active != i && app.docs.active_focus.is_none() && app.session.uid == view.owner).then_some(app.docs.active));
+        let Some(owner) = owner else {
+            app.set_status(app.tr("ui.open_part_unsupported").to_string(), true);
+            return;
+        };
+        if i == app.docs.active {
+            switch(app, owner);
+            if app.docs.active == i {
+                return;
+            }
+        } else if let Some(slot) = app.docs.slots.get(i).and_then(Option::as_ref).filter(|s| !s.placeholder) {
+            // A background component tab can hold the only live session. Move it to the owner
+            // before closing, rather than discarding edits or recovery state.
+            if app.docs.active == owner {
+                app.set_status(crate::i18n::tr("ui.open_part_finish_first").to_string(), true);
+                return;
+            }
+            let _ = slot;
+            let Some(mut donor) = app.docs.slots[i].take() else { return };
+            if let Some(target) = app.docs.slots.get_mut(owner).and_then(Option::as_mut) {
+                std::mem::swap(&mut donor.session, &mut target.session);
+                std::mem::swap(&mut donor.autosave, &mut target.autosave);
+                std::mem::swap(&mut donor.link_stamps, &mut target.link_stamps);
+                target.placeholder = false;
+                target.session.set_part_edit_scope(None);
+                donor.placeholder = true;
+            }
+            app.docs.slots[i] = Some(donor);
+        }
+        app.docs.slots.remove(i);
+        if app.docs.active > i {
+            app.docs.active -= 1;
+        }
+        return;
+    }
+    let uid = if i == app.docs.active { app.session.uid } else { app.docs.slots.get(i).and_then(Option::as_ref).map_or(0, |s| s.session.uid) };
+    if app.docs.active_focus.as_ref().is_some_and(|v| v.owner == uid)
+        || app.docs.slots.iter().flatten().any(|s| s.focus.as_ref().is_some_and(|v| v.owner == uid))
+    {
+        app.set_status(app.tr("ui.open_part_finish_first").to_string(), true);
+        return;
+    }
+    let target_path = if i == app.docs.active {
+        app.session.path.as_deref()
+    } else {
+        app.docs.slots.get(i).and_then(Option::as_ref).and_then(|slot| slot.session.path.as_deref())
+    };
+    let target_is_assembly =
+        |context: &crate::edit_in_place::PartContext| context.solo && target_path.is_some_and(|path| same_path(path, &context.assembly));
+    let assembly_in_use = app.edit_in_place.active.as_ref().is_some_and(target_is_assembly)
+        || app.docs.slots.iter().flatten().any(|slot| slot.edit_in_place.as_ref().is_some_and(target_is_assembly));
+    let background_solo = i != app.docs.active
+        && app.docs.slots.get(i).and_then(Option::as_ref).and_then(|slot| slot.edit_in_place.as_ref()).is_some_and(|context| context.solo);
+    if assembly_in_use || background_solo {
+        app.set_status(app.tr("ui.open_part_finish_first").to_string(), true);
+        return;
+    }
+    // Closing a saved, separately edited part must finish its linked assembly update, even
+    // when automatic link checks are disabled. A dirty part still uses the Save/Discard prompt.
+    if i == app.docs.active
+        && app.docs.batch.is_none()
+        && app.docs.quitting.is_none()
+        && !dirty(app, i)
+        && app.edit_in_place.active.as_ref().is_some_and(|context| context.solo)
+    {
+        app.docs.closing = None;
+        if let Some(context) = app.edit_in_place.active.as_mut() {
+            context.opened = true;
+        }
+        let original_path = app.edit_in_place.active.as_ref().map(|context| context.part.as_str());
+        if app.session.path.as_deref().zip(original_path).is_some_and(|(actual, original)| same_path(actual, original)) {
+            crate::edit_in_place::finish(app);
+        } else {
+            let original = original_path.unwrap_or_default().to_string();
+            crate::edit_in_place::discard_solo(app);
+            let message = crate::i18n::format("ui.edit_in_place_saved_elsewhere", &[("name", &original)]);
+            app.session.echo(message.clone());
+            app.set_status(message, true);
+        }
+        return;
+    }
     if !force && dirty(app, i) {
         app.docs.closing = Some(i);
         return;
@@ -561,6 +1120,9 @@ pub fn close(app: &mut SolveApp, i: usize, force: bool) {
         // Show a neighbour first, then drop this one.
         let next = if i + 1 < n { i + 1 } else { i - 1 };
         switch(app, next);
+        if app.docs.active == i {
+            return;
+        }
     }
     if let Some(slot) = app.docs.slots.remove(i)
         && let Some(a) = slot.autosave
@@ -602,6 +1164,14 @@ pub fn close_many(app: &mut SolveApp, mut tabs: Vec<usize>) {
     if app.file_picker_busy() || app.docs.quitting.is_some() || app.docs.closing.is_some() {
         return;
     }
+    if app.docs.active_focus.is_some()
+        || app.docs.slots.iter().flatten().any(|slot| slot.focus.is_some())
+        || app.edit_in_place.active.as_ref().is_some_and(|context| context.solo)
+        || app.docs.slots.iter().flatten().any(|slot| slot.edit_in_place.as_ref().is_some_and(|context| context.solo))
+    {
+        app.set_status(app.tr("ui.open_part_finish_first").to_string(), true);
+        return;
+    }
     tabs.sort_unstable();
     tabs.dedup();
     app.docs.batch = Some(tabs);
@@ -639,6 +1209,30 @@ pub fn request_quit(app: &mut SolveApp) {
     if app.file_picker_busy() {
         return;
     }
+    // Component tabs do not own separate documents. Close those views first, retaining each
+    // real session in its assembly tab, then ask once per dirty assembly as usual.
+    let views: Vec<_> = (0..app.docs.count())
+        .filter(|&i| {
+            if i == app.docs.active {
+                app.docs.active_focus.is_some()
+            } else {
+                app.docs.slots.get(i).and_then(Option::as_ref).is_some_and(|s| s.focus.is_some())
+            }
+        })
+        .collect();
+    for i in views.into_iter().rev() {
+        let before = app.docs.count();
+        close(app, i, false);
+        if app.docs.count() == before {
+            return;
+        }
+    }
+    if app.edit_in_place.active.as_ref().is_some_and(|context| context.solo)
+        || app.docs.slots.iter().flatten().any(|slot| slot.edit_in_place.as_ref().is_some_and(|context| context.solo))
+    {
+        app.set_status(app.tr("ui.open_part_finish_first").to_string(), true);
+        return;
+    }
     if app.docs.quitting.is_none() {
         app.docs.quitting = Some(Vec::new());
     }
@@ -654,6 +1248,10 @@ fn quit_step(app: &mut SolveApp) {
     match (0..app.docs.count()).find(|i| !skip.contains(i) && dirty(app, *i)) {
         Some(i) => {
             switch(app, i);
+            if app.docs.active != i {
+                app.docs.quitting = None;
+                return;
+            }
             app.docs.closing = Some(i);
         }
         None => {
@@ -680,10 +1278,31 @@ pub fn any_dirty(app: &SolveApp) -> bool {
 }
 
 fn dirty(app: &SolveApp, i: usize) -> bool {
+    let focus = if i == app.docs.active {
+        app.docs.active_focus.as_ref()
+    } else {
+        app.docs.slots.get(i).and_then(Option::as_ref).and_then(|s| s.focus.as_ref())
+    };
+    if focus.is_some() {
+        return false;
+    }
     if i == app.docs.active || app.docs.slots.is_empty() {
         return app.session.is_dirty();
     }
-    app.docs.slots.get(i).and_then(Option::as_ref).is_some_and(|s| s.session.is_dirty())
+    app.docs.slots.get(i).and_then(Option::as_ref).is_some_and(|s| {
+        if !s.placeholder {
+            return s.session.is_dirty();
+        }
+        if app.session.uid == s.session.uid {
+            return app.session.is_dirty();
+        }
+        app.docs
+            .slots
+            .iter()
+            .flatten()
+            .find(|other| other.session.uid == s.session.uid && !other.placeholder)
+            .is_some_and(|other| other.session.is_dirty())
+    })
 }
 
 /// Tab names (with an unsaved-changes flag), in order.
@@ -694,9 +1313,10 @@ pub fn tabs_info(app: &SolveApp) -> Vec<(String, bool)> {
     app.docs
         .slots
         .iter()
-        .map(|s| match s {
-            Some(d) => (d.session.doc.name.clone(), d.session.is_dirty()),
-            None => (app.session.doc.name.clone(), app.session.is_dirty()),
+        .enumerate()
+        .map(|(i, s)| match s {
+            Some(d) => (d.focus.as_ref().map_or_else(|| d.session.doc.name.clone(), |v| v.name.clone()), dirty(app, i)),
+            None => (app.docs.active_focus.as_ref().map_or_else(|| app.session.doc.name.clone(), |v| v.name.clone()), app.session.is_dirty()),
         })
         .collect()
 }
@@ -1126,7 +1746,7 @@ pub fn prompt(app: &mut SolveApp, ctx: &egui::Context) {
     let mut answer: Option<Answer> = None;
     // Left and Right move between the buttons as they are laid out (Save is picked first, at the
     // right); Enter gives the picked one.
-    let order = [Answer::DontSave, Answer::Cancel, Answer::Save];
+    let order = [Answer::Cancel, Answer::DontSave, Answer::Save];
     let (left, right, enter) = ctx.input_mut(|x| {
         (
             x.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
@@ -1150,20 +1770,20 @@ pub fn prompt(app: &mut SolveApp, ctx: &egui::Context) {
     let title = crate::i18n::format("document.save_changes", &[("name", &name_display)]);
     let (closed, action) = ui_kit::Confirm::new(egui::Id::new("sc_close_prompt"), "status_warning", &title)
         .tone(ui_kit::Tone::Warning)
-        .actions(crate::i18n::tr("ui.save"), crate::i18n::tr("ui.cancel"), Some(crate::i18n::tr("ui.don_t_save")))
+        .actions(crate::i18n::tr("ui.save"), crate::i18n::tr("ui.don_t_save"), Some(crate::i18n::tr("ui.cancel")))
         .secondary_left()
         .selected(match choice {
             Answer::Save => ui_kit::Action::Ok,
-            Answer::DontSave => ui_kit::Action::Apply,
-            Answer::Cancel => ui_kit::Action::Cancel,
+            Answer::DontSave => ui_kit::Action::Cancel,
+            Answer::Cancel => ui_kit::Action::Apply,
         })
         .show(ctx, true, |ui| {
             ui_kit::text(ui, &crate::i18n::format("document.unsaved_changes", &[("name", &name_display)]), ui_kit::Text::Report("unsaved", false));
         });
     answer = match action {
         ui_kit::Action::Ok => Some(Answer::Save),
-        ui_kit::Action::Apply => Some(Answer::DontSave),
-        ui_kit::Action::Cancel => Some(Answer::Cancel),
+        ui_kit::Action::Apply => Some(Answer::Cancel),
+        ui_kit::Action::Cancel => Some(Answer::DontSave),
         ui_kit::Action::None if closed => Some(Answer::Cancel),
         ui_kit::Action::None => answer,
     };
@@ -1196,6 +1816,9 @@ pub fn answer_prompt(app: &mut SolveApp, answer: Answer) {
             if let Some(skip) = app.docs.quitting.as_mut() {
                 skip.push(i);
                 app.docs.closing = None;
+            } else if i == app.docs.active && app.edit_in_place.active.as_ref().is_some_and(|context| context.solo) {
+                app.docs.closing = None;
+                crate::edit_in_place::discard_solo(app);
             } else {
                 close(app, i, true);
             }
@@ -1658,6 +2281,63 @@ mod tests {
         assert!(active_is_blank(&a) && a.home.open);
     }
 
+    #[test]
+    fn save_prompt_places_cancel_before_discard_and_keeps_their_actions() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        close(&mut h.app, 0, false);
+        h.frames(3);
+        let cancel = crate::scenario::rect_of("dialog:apply").unwrap();
+        let discard = crate::scenario::rect_of("dialog:cancel").unwrap();
+        let save = crate::scenario::rect_of("dialog:ok").unwrap();
+        assert!(cancel.right() < discard.left() && discard.right() < save.left());
+        h.step(&json!({"click":{"handle":"dialog:apply"}})).unwrap();
+        h.frames(2);
+        assert!(h.app.docs.closing.is_none());
+        assert!(h.app.session.is_dirty());
+        close(&mut h.app, 0, false);
+        h.frames(3);
+        h.step(&json!({"click":{"handle":"dialog:cancel"}})).unwrap();
+        h.frames(2);
+        assert!(h.app.docs.closing.is_none());
+        assert!(active_is_blank(&h.app));
+    }
+
+    #[test]
+    fn save_prompt_escape_close_and_keyboard_preserve_or_discard_as_selected() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        let undo = h.app.session.undo.len();
+        for method in ["Escape", "close", "arrows"] {
+            close(&mut h.app, 0, false);
+            h.frames(3);
+            match method {
+                "Escape" => {
+                    h.step(&json!({"key":"Escape"})).unwrap();
+                }
+                "close" => {
+                    h.step(&json!({"click":{"handle":"dialog:close"}})).unwrap();
+                }
+                _ => {
+                    h.step(&json!({"key":"ArrowLeft"})).unwrap();
+                    h.step(&json!({"key":"ArrowLeft"})).unwrap();
+                    h.step(&json!({"key":"Enter"})).unwrap();
+                }
+            }
+            h.frames(2);
+            assert!(h.app.docs.closing.is_none(), "{method}");
+            assert!(h.app.session.is_dirty(), "{method} must keep changes");
+            assert_eq!(h.app.session.undo.len(), undo, "{method} must keep undo");
+        }
+        close(&mut h.app, 0, false);
+        h.frames(3);
+        h.step(&json!({"key":"ArrowLeft"})).unwrap();
+        h.step(&json!({"key":"Enter"})).unwrap();
+        h.frames(2);
+        assert!(h.app.docs.closing.is_none());
+        assert!(active_is_blank(&h.app), "left then Enter deliberately discards");
+    }
+
     /// Direct tab creation remains available, including reuse of an untouched launch design.
     #[test]
     fn direct_new_tab_reuses_the_launch_design_then_opens_a_tab_every_time() {
@@ -1912,7 +2592,7 @@ mod tests {
         assert!(dialog_picks(&a) == picks && a.ui.tab == "INSPECT");
         switch(&mut a, 1);
         switch(&mut a, 0);
-        assert!(a.dialog.is_none() && a.ui.tab == "MODEL");
+        assert!(a.dialog.is_none() && a.ui.tab == if solidcraft_engine::product::PRODUCT.branded { "SHEET METAL" } else { "MODEL" });
     }
 
     /// Without the preference (the default), a switch cancels the dialog and the tool and shows
@@ -1923,7 +2603,7 @@ mod tests {
         let (mut a, _) = measuring_and_drawing(false);
         switch(&mut a, 0);
         assert!(a.dialog.is_none() && a.tool.is_none());
-        assert_eq!(a.ui.tab, "MODEL");
+        assert_eq!(a.ui.tab, if solidcraft_engine::product::PRODUCT.branded { "SHEET METAL" } else { "MODEL" });
         switch(&mut a, 1);
         assert!(a.dialog.is_none() && a.tool.is_none());
         // The sketch itself stays open in its design, so its tab is SKETCH.

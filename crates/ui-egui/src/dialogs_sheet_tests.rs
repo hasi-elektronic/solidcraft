@@ -550,6 +550,49 @@ fn the_rule_manager_relieves_a_corner_that_is_not_square() {
 /// The Flange dialog's relief rows: Rule (the default) and an empty size leave the relief to the rule,
 /// a shape and a size reach the feature, Edit Feature shows them again, and Rule takes them back.
 #[test]
+fn flange_dialog_saves_and_reopens_its_corner_gap() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.preferences.language = "en".into();
+    h.app.run("sheet.manage_rules", json!({"name":"AL2","thickness":"2 mm","bend_radius":"1 mm","gap":"0.5 mm","active":true})).unwrap();
+    h.app.run("sketch.create", json!({"plane":"XY","name":"Base"})).unwrap();
+    h.app.run("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[120,90]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.app.run("sheet.flange", json!({"sketch":"Base"})).unwrap();
+    h.app.session.selection =
+        [[60.0, 0.0, 2.0], [0.0, 45.0, 2.0]].iter().filter_map(|p| edge_sel(&h.app.session, Vec3::new(p[0], p[1], p[2]))).collect();
+    assert_eq!(h.app.session.selection.len(), 2);
+    h.app.start("sheet.flange");
+    h.frames(3);
+    let d = h.app.dialog.clone().unwrap();
+    assert!(apply_commands(&h.app, &d).unwrap()[0].1.get("corner_gap").is_none());
+    h.step(&json!({"click":{"handle":"dialog:section:Advanced"}})).unwrap();
+    h.step(&json!({"click":{"handle":"dialog:Flange Gap"}})).unwrap();
+    h.step(&json!({"key":"A","cmd":true})).unwrap();
+    h.step(&json!({"text":"1.2 mm"})).unwrap();
+    let d = h.app.dialog.clone().unwrap();
+    assert_eq!(apply_commands(&h.app, &d).unwrap()[0].1["corner_gap"], "1.2 mm");
+    h.step(&json!({"widget":"OK"})).unwrap();
+    let id = h.app.session.doc.features.last().unwrap().id;
+    let mut edited = edit_dialog(&h.app, id, None).unwrap();
+    assert!(matches!(&edited.kind, Kind::Sheet(Sm::Flange { corner_gap, .. }) if corner_gap == "1.2 mm"));
+    if let Kind::Sheet(Sm::Flange { corner_gap, .. }) = &mut edited.kind {
+        *corner_gap = "0.8 mm".into();
+    }
+    let commands = apply_commands(&h.app, &edited).unwrap();
+    run_all(&mut h.app, commands);
+    let mut edited = edit_dialog(&h.app, id, None).unwrap();
+    assert!(matches!(&edited.kind, Kind::Sheet(Sm::Flange { corner_gap, .. }) if corner_gap == "0.8 mm"));
+    if let Kind::Sheet(Sm::Flange { corner_gap, .. }) = &mut edited.kind {
+        corner_gap.clear();
+    }
+    let commands = apply_commands(&h.app, &edited).unwrap();
+    run_all(&mut h.app, commands);
+    let edited = edit_dialog(&h.app, id, None).unwrap();
+    assert!(matches!(&edited.kind, Kind::Sheet(Sm::Flange { corner_gap, .. }) if corner_gap.is_empty()));
+    assert_eq!(h.app.session.doc.sheet_rule(None).gap, "0.5 mm");
+}
+
+#[test]
 fn flange_dialog_picks_a_corner_relief_of_its_own() {
     for mode in [crate::shell::LayoutMode::Floating, crate::shell::LayoutMode::Docked] {
         let mut h = crate::scenario::Harness::new();
@@ -895,6 +938,69 @@ fn convert_takes_the_fixed_face_and_the_bend_edges() {
     run_all(&mut app, c);
     assert_eq!(bends(&mut app), Some(4));
     assert!(app.session.model.results.iter().all(|r| r.error.is_none()), "{:?}", app.session.model.results);
+}
+
+#[test]
+fn bend_suggestions_are_reviewable_and_do_not_replace_manual_picks() {
+    let mut app = plate(crate::shell::LayoutMode::Floating);
+    app.run("sheet.flange", json!({"sketch":"Base"})).unwrap();
+    app.run("sheet.flange", json!({"edges":[[50,0,2.5],[100,30,2.5],[50,60,2.5],[0,30,2.5]],"height":30})).unwrap();
+    let (_, mut inputs) = start(&app, "sheet.convert").unwrap();
+    inputs[0].items = face_sel(&app.session, Vec3::new(50.0, 30.0, 0.0)).into_iter().collect();
+    assert_eq!(inputs[0].items.len(), 1);
+    let before = serde_json::to_value(&*app.session.doc).unwrap();
+    let undo = app.session.undo.len();
+    let mut seen = None;
+    let mut suggested = Vec::new();
+    suggest_for_fixed_face(&app, &mut inputs, &mut seen, &mut suggested, true);
+    assert_eq!(inputs[1].items.len(), 4);
+    assert_eq!(serde_json::to_value(&*app.session.doc).unwrap(), before);
+    assert_eq!(app.session.undo.len(), undo);
+    let manual = inputs[1].items[0].clone();
+    inputs[1].items = vec![manual.clone()];
+    suggest_for_fixed_face(&app, &mut inputs, &mut seen, &mut suggested, true);
+    assert_eq!(inputs[1].items, vec![manual]);
+    inputs[1].items.clear();
+    suggest_for_fixed_face(&app, &mut inputs, &mut seen, &mut suggested, true);
+    assert!(inputs[1].items.is_empty(), "clearing a suggestion is respected");
+    let (body, face_index, point) = match &inputs[0].items[0] {
+        Sel::Face { body, index, point } => (body.clone(), *index, *point),
+        _ => panic!("expected a face"),
+    };
+    let manual = Sel::Edge { body: body.clone(), index: usize::MAX, point };
+    inputs[1].items.push(manual.clone());
+    inputs[0].items = vec![Sel::Face { body: body.clone(), index: face_index + 1, point }];
+    suggest_for_fixed_face(&app, &mut inputs, &mut seen, &mut suggested, true);
+    assert!(inputs[1].items.contains(&manual), "a manually chosen edge survives a face change");
+    inputs[0].items = vec![Sel::Face { body: "Different body".into(), index: 0, point }];
+    suggest_for_fixed_face(&app, &mut inputs, &mut seen, &mut suggested, true);
+    assert_eq!(inputs[1].items, vec![manual], "the former automatic edges are removed");
+    let convert = Sm::Convert { rule: 0, auto_bends: true, suggested_face: seen, suggested_edges: suggested };
+    assert!(commands(&app, &convert, &inputs, &serde_json::Map::new()).unwrap_err().contains("fixed face"));
+}
+
+#[test]
+fn manually_reselected_suggestion_stays_when_automatic_mode_is_disabled() {
+    let mut app = plate(crate::shell::LayoutMode::Floating);
+    app.run("sheet.flange", json!({"sketch":"Base"})).unwrap();
+    app.run("sheet.flange", json!({"edges":[[50,0,2.5],[100,30,2.5],[50,60,2.5],[0,30,2.5]],"height":30})).unwrap();
+    app.start("sheet.convert");
+    let mut dialog = app.dialog.take().unwrap();
+    dialog.inputs[0].items = face_sel(&app.session, Vec3::new(50.0, 30.0, 0.0)).into_iter().collect();
+    let Kind::Sheet(Sm::Convert { suggested_face, suggested_edges, .. }) = &mut dialog.kind else { panic!("convert dialog") };
+    suggest_for_fixed_face(&app, &mut dialog.inputs, suggested_face, suggested_edges, true);
+    let picked = dialog.inputs[1].items.first().unwrap().clone();
+    dialog.active = 1;
+    dialog.pick(&app.session, picked.clone());
+    dialog.pick(&app.session, picked.clone());
+    app.dialog = Some(dialog);
+    let mut h = crate::scenario::Harness::new();
+    h.app = app;
+    h.app.home.open = false;
+    h.frames(3);
+    h.step(&json!({"click":{"handle":"sketch_palette:toggle:sm_auto_bends"}})).unwrap();
+    let dialog = h.app.dialog.as_ref().unwrap();
+    assert!(dialog.inputs[1].items.iter().any(|item| crate::selection::same_item(item, &picked)), "the manually reselected edge stays");
 }
 
 /// The Path Flange dialog takes the edge and the path's sketch lines: one feature, one body,

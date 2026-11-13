@@ -4150,6 +4150,86 @@ fn relief_drawing(s: &mut Session) -> (Vec<(solidcraft_geom::Vec2, f64)>, Vec<so
 }
 
 #[test]
+fn flange_corner_gap_is_local_to_the_feature_and_survives_reopen() {
+    use std::f64::consts::SQRT_2;
+    let mut s = two_flange_groups(json!({}), json!({"corner_gap":"1.2 mm"}), json!({}));
+    assert!(no_errors_or_warnings(&s), "{:?}", s.model.results);
+    let sh = &s.model.state().sheets[0];
+    assert!((sh.gap - 0.5).abs() < 1e-9, "the sheet rule remains unchanged");
+    // R=1, T=2, 90 degrees: the flange panel runs on 1 - gap/sqrt(2).
+    assert!((sh.flanges[0].ext.0 - (1.0 - 1.2 / SQRT_2)).abs() < 1e-8, "{:?}", sh.flanges[0].ext);
+    assert!(
+        (sh.flanges[2].ext.1 - (1.0 - 0.5 / SQRT_2)).abs() < 1e-8 || (sh.flanges[2].ext.0 - (1.0 - 0.5 / SQRT_2)).abs() < 1e-8,
+        "{:?}",
+        sh.flanges[2].ext
+    );
+    let saved = s.doc.to_json();
+    let path = std::env::temp_dir().join(format!("solid-flange-gap-{}.sc", std::process::id()));
+    assert!(!path.exists());
+    run(&mut s, "file.save_as", json!({"path":path}));
+    let mut from_file = Session::default();
+    run(&mut from_file, "doc.open", json!({"path":path}));
+    assert!((from_file.model.state().sheets[0].flanges[0].ext.0 - (1.0 - 1.2 / SQRT_2)).abs() < 1e-8);
+    drop(from_file);
+    drop(s);
+    std::fs::remove_file(path).unwrap();
+    let mut opened = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
+    let reopened = &opened.model.state().sheets[0];
+    assert!((reopened.flanges[0].ext.0 - (1.0 - 1.2 / SQRT_2)).abs() < 1e-8);
+    assert!((reopened.gap - 0.5).abs() < 1e-9);
+    let before = opened.doc.to_json();
+    for value in [json!("0 mm"), json!("-1 mm"), json!(true), json!({}), json!(""), json!("x".repeat(4097))] {
+        assert!(opened.execute("sheet.flange", &json!({"edges":[[60,0,2]],"height":20,"corner_gap":value})).is_err(), "{value}");
+        assert_eq!(opened.doc.to_json(), before, "invalid gap must not change the design");
+    }
+}
+
+#[test]
+fn flange_corner_gap_applies_to_all_four_selected_edges() {
+    let mut s = Session::default();
+    run(&mut s, "sheet.manage_rules", json!({"name":"AL2","thickness":"2 mm","bend_radius":"1 mm","gap":"0.5 mm","active":true}));
+    base(&mut s, 120.0, 90.0);
+    run(&mut s, "sheet.flange", json!({"edges":[[60,0,2],[120,45,2],[60,90,2],[0,45,2]],"height":"20 mm","corner_gap":"1.2 mm"}));
+    assert!(no_errors_or_warnings(&s), "{:?}", s.model.results);
+    let sh = &s.model.state().sheets[0];
+    assert_eq!(sh.flanges.len(), 4);
+    let expected = 1.0 - 1.2 / std::f64::consts::SQRT_2;
+    for flange in &sh.flanges {
+        assert!((flange.ext.0 - expected).abs() < 1e-8 && (flange.ext.1 - expected).abs() < 1e-8, "{:?}", flange.ext);
+    }
+}
+
+#[test]
+fn flange_corner_gap_uses_design_units_and_rejects_unrelated_edges() {
+    let mut s = Session::default();
+    run(&mut s, "sheet.manage_rules", json!({"name":"AL2","thickness":"2 mm","bend_radius":"1 mm","gap":"0.5 mm","active":true}));
+    base(&mut s, 120.0, 90.0);
+    run(&mut s, "document.units", json!({"units":"in"}));
+    let before = s.doc.to_json();
+    let undo = s.undo.len();
+    for ty in ["base", "contour", "edge"] {
+        let invalid = json!({"type":ty,"sketch":"Base","base":{"corner_gap":"1 mm"},"edges":[[60,0,2]],"height":"20 mm"});
+        assert!(s.execute("sheet.flange", &invalid).is_err(), "{ty}");
+        assert_eq!(s.doc.to_json(), before);
+        assert_eq!(s.undo.len(), undo);
+    }
+    let edges = json!([[60, 0, 2], [0, 45, 2]]);
+    assert!(s.execute("sheet.flange", &json!({"edges":edges,"height":"20 mm","corner_gap":0.0001})).is_err());
+    assert_eq!(s.doc.to_json(), before);
+    run(&mut s, "sheet.flange", json!({"edges":edges,"height":"20 mm","corner_gap":0.005}));
+    let sh = &s.model.state().sheets[0];
+    assert!((sh.flanges[0].ext.0 - (1.0 - 0.127 / std::f64::consts::SQRT_2)).abs() < 1e-8);
+    let mut separate = Session::default();
+    run(&mut separate, "sheet.manage_rules", json!({"name":"AL2","thickness":"2 mm","bend_radius":"1 mm","active":true}));
+    base(&mut separate, 120.0, 90.0);
+    run(&mut separate, "sheet.flange", json!({"edges":[[60,0,2]],"height":"20 mm"}));
+    let before = separate.doc.to_json();
+    let err = separate.execute("sheet.flange", &json!({"edges":[[0,45,2]],"height":"20 mm","corner_gap":"1 mm"})).unwrap_err().to_string();
+    assert!(err.contains("adjacent flanges created together"), "{err}");
+    assert_eq!(separate.doc.to_json(), before);
+}
+
+#[test]
 fn each_edge_flange_feature_chooses_the_corner_relief_of_its_own_corners() {
     use solidcraft_geom::Vec2;
     // At 90° the bends of a corner meet at (s0, s0) in from the sheet's edges, s0 = (R + T)·tan 45° = 3,

@@ -1,0 +1,26 @@
+{
+  "ar": {
+    "ui.part_view_feature_in_assembly": "حرر هذه الميزة في عرض التجميع."
+  },
+  "de": {
+    "ui.part_view_feature_in_assembly": "Dieses Merkmal in der Baugruppenansicht bearbeiten."
+  },
+  "en": {
+    "ui.part_view_feature_in_assembly": "Edit this feature in the assembly view."
+  },
+  "he": {
+    "ui.part_view_feature_in_assembly": "ערוך תכונה זו בתצוגת המכלול."
+  },
+  "ja": {
+    "ui.part_view_feature_in_assembly": "このフィーチャーはアセンブリ表示で編集してください。"
+  },
+  "ko": {
+    "ui.part_view_feature_in_assembly": "이 피처는 조립품 보기에서 편집하세요."
+  },
+  "vi": {
+    "ui.part_view_feature_in_assembly": "Chỉnh sửa đặc tính này trong chế độ xem cụm lắp ráp."
+  },
+  "zh": {
+    "ui.part_view_feature_in_assembly": "请在装配体视图中编辑此特征。"
+  }
+}

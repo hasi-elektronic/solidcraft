@@ -1195,7 +1195,7 @@ preference_settings! {
     theme_options: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new(), PAGE_APPEARANCE;
     /// Interface language: a registered locale ID, or `system` to follow the system's language
     /// on every start (#10138). A saved language keeps winning, so existing users don't change.
-    language: String = "system".into(), 0;
+    language: String = if solidcraft_engine::product::PRODUCT.branded { "de".into() } else { "system".into() }, 0;
     /// Shared workspace composition; system windows and popups retain their purpose.
     layout: crate::shell::LayoutMode = Default::default(), PAGE_LAYOUT;
     /// Ordered view controls and their appearance.
@@ -1434,7 +1434,7 @@ preference_settings! {
     agent_control: bool = true, PAGE_ASSISTANT;
     /// Add SolidCraft's MCP server to the AI apps installed on this computer at start-up
     /// ([`crate::ai_connect`]); off takes the entries out again.
-    connect_ai_apps: bool = true, PAGE_ASSISTANT;
+    connect_ai_apps: bool = !solidcraft_engine::product::PRODUCT.branded, PAGE_ASSISTANT;
     /// Agents the user added (the installed ones are found by themselves). API keys are never
     /// here: they live in the system keychain.
     agents: Vec<crate::agent_chat::agents::AgentConfig> = Vec::new();
@@ -6094,9 +6094,10 @@ mod tests {
         assert_eq!(serde_json::to_value(&app.preferences.personal_sheet_rules).unwrap(), expected);
         let saved = app.prefs();
         let mut other = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        let initial_sheet = other.session.doc.sheet.clone();
         other.load_prefs(&saved);
         assert_eq!(serde_json::to_value(&other.preferences.personal_sheet_rules).unwrap(), expected);
-        assert!(other.session.doc.sheet.rules.is_empty(), "a personal rule is not a rule of the design");
+        assert_eq!(other.session.doc.sheet, initial_sheet, "a personal rule is not a rule of the design");
     }
 
     /// The interface font (#1290): a font that can be read, or empty for the built-in one; saved
@@ -9144,8 +9145,8 @@ mod tests {
     #[test]
     fn language_preference_switches_and_persists() {
         let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
-        // A first start follows the system (#10138), which is English in a test.
-        assert_eq!(app.preferences.language, crate::i18n::SYSTEM);
+        assert_eq!(app.preferences.language, if solidcraft_engine::product::PRODUCT.branded { "de" } else { crate::i18n::SYSTEM });
+        app.preferences.language = "en".into();
         assert_eq!(app.tr("ui.preferences"), "Preferences");
         assert_eq!(app.tr("ui.extrude"), "Extrude");
 

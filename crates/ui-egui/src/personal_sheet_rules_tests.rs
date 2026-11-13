@@ -12,6 +12,7 @@ use crate::scenario::Harness;
 /// unfolded.
 fn manager(units: &str) -> Harness {
     let mut h = Harness::new();
+    h.app.preferences.language = "en".into();
     h.app.home.open = false;
     if units != "mm" {
         h.app.run("document.units", json!({ "units": units })).unwrap();
@@ -79,6 +80,7 @@ fn row(name: &str) -> Value {
 #[test]
 fn a_personal_rule_saved_in_one_design_is_added_to_another_by_ok() {
     let mut h = manager("mm");
+    let initial_sheet = h.app.session.doc.sheet.clone();
     type_values(&mut h, ["1.6", "0.42", "1.6", "Thickness", "Thickness * 0.5", "Thickness * 4.0", "0.01", "Thickness"]);
     save_personal(&mut h, "CRS 1.6");
     // Bare numbers are saved with the design's unit; expressions as written.
@@ -88,7 +90,7 @@ fn a_personal_rule_saved_in_one_design_is_added_to_another_by_ok() {
             "relief_depth":"Thickness * 0.5","corner_relief":"Thickness * 4.0","corner_relief_shape":"notch","hem_gap":"0.01 mm",
             "gap":"Thickness","angle_display":"bend"}])
     );
-    assert!(h.app.session.doc.sheet.rules.is_empty(), "saving a personal rule is a preference, not a design change");
+    assert_eq!(h.app.session.doc.sheet, initial_sheet, "saving a personal rule is a preference, not a design change");
 
     let mut other = manager_with("mm", &h.app.preferences.personal_sheet_rules);
     let before = serde_json::to_value(&*other.app.session.doc).unwrap();
@@ -147,7 +149,11 @@ fn a_personal_rule_updates_the_design_rule_of_the_same_name() {
     h.frames(4);
     choose_personal(&mut h, "Shop 3 mm");
     let Sm::Rules { pick, active, .. } = sm(&mut h) else { panic!() };
-    assert_eq!((*pick, *active), (0, false), "the design's own rule of that name, still not its active rule");
+    assert_eq!(
+        (*pick, *active),
+        (if solidcraft_engine::product::PRODUCT.branded { 1 } else { 0 }, false),
+        "the design's own rule of that name, still not its active rule"
+    );
     let commands = ok_commands(&h);
     assert_eq!(
         [&commands[0].1["name"], &commands[0].1["thickness"], &commands[0].1["k_factor"], &commands[0].1["bend_radius"], &commands[0].1["active"]],
@@ -156,7 +162,7 @@ fn a_personal_rule_updates_the_design_rule_of_the_same_name() {
     h.step(&json!({"click":{"handle":"dialog:ok"}})).unwrap();
     h.frames(4);
     let doc = &h.app.session.doc;
-    assert_eq!(doc.sheet.rules.len(), 2, "updated in place, not added again");
+    assert_eq!(doc.sheet.rules.len(), if solidcraft_engine::product::PRODUCT.branded { 3 } else { 2 }, "updated in place, not added again");
     assert_eq!(doc.sheet_rule(Some("Shop 3 mm")).thickness, "3 mm");
     assert_eq!(doc.sheet.active.as_deref(), Some("Other"));
 }
@@ -164,8 +170,9 @@ fn a_personal_rule_updates_the_design_rule_of_the_same_name() {
 #[test]
 fn the_save_icon_rename_and_delete_change_only_the_personal_library() {
     let mut h = manager("mm");
+    let initial_sheet = h.app.session.doc.sheet.clone();
     save_personal(&mut h, "Steel 2.5");
-    assert_eq!(library_json(&h)[0]["thickness"], "2.5 mm");
+    assert_eq!(library_json(&h)[0]["thickness"], if solidcraft_engine::product::PRODUCT.branded { "2 mm" } else { "2.5 mm" });
     let Sm::Rules { values, .. } = sm(&mut h) else { panic!() };
     values[0] = "3 mm".into();
     h.frames(2);
@@ -184,7 +191,7 @@ fn the_save_icon_rename_and_delete_change_only_the_personal_library() {
     h.step(&json!({"widget":"Confirm delete"})).unwrap();
     h.frames(2);
     assert_eq!(library_json(&h), json!([]));
-    assert!(h.app.session.doc.sheet.rules.is_empty(), "the design never changed");
+    assert_eq!(h.app.session.doc.sheet, initial_sheet, "the design never changed");
 }
 
 #[test]

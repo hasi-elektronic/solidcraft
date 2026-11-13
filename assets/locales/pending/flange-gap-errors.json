@@ -1,0 +1,42 @@
+{
+  "en": {
+    "the flange gap must be at least 0.01 mm": "the flange gap must be at least 0.01 mm",
+    "the flange gap could not be applied to every selected corner": "the flange gap could not be applied to every selected corner",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex"
+  },
+  "de": {
+    "the flange gap must be at least 0.01 mm": "Der Flanschspalt muss mindestens 0,01 mm betragen",
+    "the flange gap could not be applied to every selected corner": "Der Flanschspalt konnte nicht auf alle ausgewählten Ecken angewendet werden",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "Der Flanschspalt gilt nur für gemeinsam erstellte benachbarte Flansche an einem Blech ohne vorhandene Flansche; die Ecken müssen konvex sein"
+  },
+  "ja": {
+    "the flange gap must be at least 0.01 mm": "フランジ間隔は0.01 mm以上にしてください",
+    "the flange gap could not be applied to every selected corner": "選択したすべての角にフランジ間隔を適用できませんでした",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "フランジ間隔は既存フランジのない板に同時作成した隣接フランジにのみ適用でき、角は凸である必要があります"
+  },
+  "zh": {
+    "the flange gap must be at least 0.01 mm": "法兰间隙必须至少为 0.01 mm",
+    "the flange gap could not be applied to every selected corner": "无法将法兰间隙应用到所有选定的角",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "法兰间隙仅适用于无现有法兰的钣金上同时创建的相邻法兰；转角必须为凸角"
+  },
+  "ko": {
+    "the flange gap must be at least 0.01 mm": "플랜지 간격은 0.01 mm 이상이어야 합니다",
+    "the flange gap could not be applied to every selected corner": "선택한 모든 모서리에 플랜지 간격을 적용할 수 없습니다",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "플랜지 간격은 기존 플랜지가 없는 판에 함께 만든 인접 플랜지에만 적용되며 모서리는 볼록해야 합니다"
+  },
+  "ar": {
+    "the flange gap must be at least 0.01 mm": "يجب ألا تقل فجوة الحواف عن 0.01 مم",
+    "the flange gap could not be applied to every selected corner": "تعذر تطبيق فجوة الحواف على كل الزوايا المحددة",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "تنطبق فجوة الحواف على الحواف المتجاورة المنشأة معًا على صفيحة بلا حواف سابقة؛ يجب أن تكون الزوايا محدبة"
+  },
+  "he": {
+    "the flange gap must be at least 0.01 mm": "מרווח האוגנים חייב להיות לפחות 0.01 מ״מ",
+    "the flange gap could not be applied to every selected corner": "לא ניתן להחיל את מרווח האוגנים על כל הפינות שנבחרו",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "מרווח האוגנים חל על אוגנים סמוכים שנוצרו יחד בפח ללא אוגנים קיימים; הפינות חייבות להיות קמורות"
+  },
+  "vi": {
+    "the flange gap must be at least 0.01 mm": "Khe hở mép gấp phải ít nhất 0,01 mm",
+    "the flange gap could not be applied to every selected corner": "Không thể áp dụng khe hở cho tất cả các góc đã chọn",
+    "the flange gap applies only to adjacent flanges created together on a sheet without existing flanges; corners must be convex": "Khe hở chỉ áp dụng cho các mép gấp liền kề được tạo cùng nhau trên tấm chưa có mép gấp; các góc phải lồi"
+  }
+}

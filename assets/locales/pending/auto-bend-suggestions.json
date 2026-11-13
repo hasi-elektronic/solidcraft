@@ -1,0 +1,42 @@
+{
+  "ar": {
+    "all bend edges must belong to the fixed face's body": "يجب أن تنتمي جميع حواف الثني إلى جسم الوجه الثابت",
+    "ui.sheet_auto_bends": "اقتراح حواف الثني تلقائياً",
+    "ui.sheet_auto_bends_review": "يتم اقتراح الثنيات الأسطوانية المعروفة فقط. اختر يدوياً عند عدم الوضوح وراجع جميع الحواف قبل التطبيق."
+  },
+  "he": {
+    "all bend edges must belong to the fixed face's body": "כל קצוות הכיפוף חייבים להשתייך לגוף של הפאה הקבועה",
+    "ui.sheet_auto_bends": "הצעת קצוות כיפוף אוטומטית",
+    "ui.sheet_auto_bends_review": "מוצעים רק כיפופים גליליים שזוהו. במקרים לא ברורים יש לבחור ידנית ולבדוק את כל הקצוות לפני ההחלה."
+  },
+  "vi": {
+    "all bend edges must belong to the fixed face's body": "Tất cả cạnh uốn phải thuộc khối của mặt cố định",
+    "ui.sheet_auto_bends": "Tự động đề xuất cạnh uốn",
+    "ui.sheet_auto_bends_review": "Chỉ đề xuất các nếp uốn hình trụ được nhận dạng. Hãy chọn thủ công khi không rõ và kiểm tra mọi cạnh trước khi áp dụng."
+  },
+  "de": {
+    "all bend edges must belong to the fixed face's body": "Alle Biegekanten müssen zum Körper der festen Fläche gehören",
+    "ui.sheet_auto_bends": "Biegekanten automatisch vorschlagen",
+    "ui.sheet_auto_bends_review": "Nur erkannte zylindrische Biegungen werden vorgeschlagen. Bei unklarer Geometrie manuell wählen; alle Kanten vor dem Anwenden prüfen."
+  },
+  "en": {
+    "all bend edges must belong to the fixed face's body": "all bend edges must belong to the fixed face's body",
+    "ui.sheet_auto_bends": "Suggest bend edges automatically",
+    "ui.sheet_auto_bends_review": "Only recognized cylindrical bends are suggested. Ambiguous cases require manual selection; review every edge before applying."
+  },
+  "ja": {
+    "all bend edges must belong to the fixed face's body": "すべての曲げエッジは固定面のボディに属する必要があります",
+    "ui.sheet_auto_bends": "曲げエッジを自動提案",
+    "ui.sheet_auto_bends_review": "認識された円筒曲げのみ提案します。曖昧な場合は手動で選択し、適用前にすべてのエッジを確認してください。"
+  },
+  "ko": {
+    "all bend edges must belong to the fixed face's body": "모든 굽힘 모서리는 고정 면의 바디에 속해야 합니다",
+    "ui.sheet_auto_bends": "굽힘 모서리 자동 제안",
+    "ui.sheet_auto_bends_review": "인식된 원통형 굽힘만 제안합니다. 불명확한 경우 수동으로 선택하고 적용 전에 모든 모서리를 확인하세요."
+  },
+  "zh": {
+    "all bend edges must belong to the fixed face's body": "所有折弯边必须属于固定面的实体",
+    "ui.sheet_auto_bends": "自动建议折弯边",
+    "ui.sheet_auto_bends_review": "仅建议识别出的圆柱形折弯。情况不明确时请手动选择，应用前检查所有边。"
+  }
+}

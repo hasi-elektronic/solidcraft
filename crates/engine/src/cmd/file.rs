@@ -116,7 +116,7 @@ pub static COMMANDS: &[CommandSpec] = &[
 
 fn new_doc(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_(p, "name").unwrap_or("Untitled");
-    s.replace_design(Session::new(Document::new(name)));
+    s.replace_design(Session::new(crate::new_design_document(name)));
     // A name given here is the user's own, so Save As keeps it (#4907); "Untitled" is none.
     s.user_named = !name.trim().is_empty() && name.trim() != DEFAULT_NAME;
     Ok(json!({"name": name}))
@@ -325,7 +325,7 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if let Some(command) = super::drawing_import_command(path) {
         let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-        let mut fresh = Session::new(Document::new(&stem));
+        let mut fresh = Session::new(crate::new_design_document(&stem));
         let mut out = fresh.execute(command, &json!({"path": path}))?;
         fresh.undo.clear();
         s.replace_design(fresh);
@@ -338,7 +338,7 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if solidcraft_io::is_point_cloud_path(path) {
         // A new, unsaved design holding the points.
         let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-        let mut fresh = Session::new(Document::new(&stem));
+        let mut fresh = Session::new(crate::new_design_document(&stem));
         let mut q = serde_json::Map::new();
         q.insert("path".into(), json!(path));
         for k in ["units", "max_points"] {
@@ -356,7 +356,7 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if solidcraft_io::is_step_path(path) || solidcraft_io::is_mesh_path(path) {
         // A new, unsaved design holding the file's bodies.
         let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-        let mut fresh = Session::new(Document::new(&stem));
+        let mut fresh = Session::new(crate::new_design_document(&stem));
         let r = if solidcraft_io::is_step_path(path) {
             add_step(&mut fresh, path, None, &step_options(p, "doc.open")?)?
         } else {
@@ -789,7 +789,7 @@ fn export_to(
             return Err(bad(cmd, "design JSON exports the complete document; omit bodies"));
         }
         solidcraft_io::write_design(&s.design())
-    } else if format == Format::Step && bodies.is_empty() && !s.doc.occurrences.is_empty() {
+    } else if format == Format::Step && bodies.is_empty() && (!s.doc.components.is_empty() || !s.doc.occurrences.is_empty()) {
         solidcraft_io::step_assembly(&s.doc, &s.doc.painted(&s.model.state()), &name)?
     } else {
         // Bodies carry the colour they are shown in (appearance, material or imported), and the
@@ -1094,6 +1094,22 @@ mod urdf_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branded_new_sheet_rule_is_editable_and_does_not_change_existing_documents() {
+        let mut session = Session::default();
+        if crate::product::PRODUCT.branded {
+            assert_eq!(session.doc.sheet_rule(None).thickness, "2 mm");
+            session.execute("sheet.manage_rules", &json!({"name":"Steel (mm)","thickness":"3 mm","active":true})).unwrap();
+            assert_eq!(session.doc.sheet_rule(None).thickness, "3 mm");
+            session.execute("file.new", &json!({})).unwrap();
+            assert_eq!(session.doc.sheet_rule(None).thickness, "2 mm");
+            let existing = Session::new(Document::new("old design"));
+            assert_eq!(existing.doc.sheet_rule(None).thickness, "2.5 mm");
+        } else {
+            assert_eq!(session.doc.sheet_rule(None).thickness, "2.5 mm");
+        }
+    }
 
     /// #8139: with `objects: "component"` a 3MF has one object for each placement of a component
     /// with two or more bodies, its bodies the object's parts; the design's own bodies stay objects

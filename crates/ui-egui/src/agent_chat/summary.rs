@@ -47,7 +47,14 @@ pub fn tool_name(title: &str) -> Option<&str> {
     let name = head.split(|c: char| c == ':' || c.is_whitespace()).next()?;
     let parts: Vec<&str> = name.split("__").take(4).collect();
     match parts.as_slice() {
-        ["mcp", server, tool] if server.to_ascii_lowercase().contains("solidcraft") && !tool.is_empty() => Some(*tool),
+        ["mcp", server, tool]
+            if ["solidcraft", "solidcraft-app", "hasisolid", "hasisolid-app", "mssolid", "mssolid-app"]
+                .iter()
+                .any(|name| server.eq_ignore_ascii_case(name))
+                && !tool.is_empty() =>
+        {
+            Some(*tool)
+        }
         [bare] if !bare.is_empty() && head.strip_prefix(*bare).is_some_and(|rest| rest.is_empty() || rest.starts_with(':')) => Some(*bare),
         _ => None,
     }

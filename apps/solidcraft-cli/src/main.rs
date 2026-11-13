@@ -43,6 +43,7 @@ mod spatial;
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
+#[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
 #[path = "../../../assets/icons/app/shared/source/app_icon.rs"]
 mod app_icon;
 
@@ -195,7 +196,7 @@ fn main() -> ExitCode {
         // The standard Assistant model test (#4851), run against a desktop app over its control channel.
         Some("bench-assistant") => bench_assistant::run(&args[1..]),
         Some("--version" | "-V") => {
-            println!("solidcraft-cli {}", env!("CARGO_PKG_VERSION"));
+            println!("{}-cli {}", solidcraft_engine::product::PRODUCT.xdg_folder, solidcraft_engine::product::PRODUCT.version);
             Ok(())
         }
         // Asked-for help is not an error: usage on stdout, exit 0.
@@ -209,6 +210,7 @@ fn main() -> ExitCode {
     match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
+            let e = if e.starts_with("usage:") { branded_help(e) } else { e };
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
@@ -249,15 +251,27 @@ fn usage() -> String {
         s.push_str(c.usage);
     }
     s.push_str(USAGE_DEBUG);
-    s
+    branded_help(s)
 }
 
 /// A command's own usage: its lines under a `usage:` line.
 fn command_usage(cmd: &str) -> String {
-    match COMMANDS.iter().find(|c| c.name == cmd) {
+    branded_help(match COMMANDS.iter().find(|c| c.name == cmd) {
         Some(c) => format!("usage:\n{}", c.usage),
         None => usage(),
+    })
+}
+
+fn branded_help(text: String) -> String {
+    let product = solidcraft_engine::product::PRODUCT;
+    if !product.branded {
+        return text;
     }
+    text.replace(" [--live]", "")
+        .replace("; --live adds `solidcraft-live` for the running app", "")
+        .replace("solidcraft-cli", &format!("{}-cli", product.xdg_folder))
+        .replace("`solidcraft`", &format!("`{}`", product.xdg_folder))
+        .replace("SolidCraft", product.name)
 }
 
 /// Whether the name is a command the CLI takes.
@@ -651,7 +665,19 @@ fn cmd_icon(args: &[String]) -> Result<(), String> {
 }
 
 fn icon_png(size: usize) -> Result<Vec<u8>, String> {
-    solidcraft_engine::render::png(size, size, app_icon::rgba(size)?).ok_or_else(|| "icon: PNG encoding failed".to_string())
+    #[cfg(feature = "brand-hasisolid")]
+    let brand = include_bytes!("../../../assets/brands/hasisolid/app.png").as_slice();
+    #[cfg(feature = "brand-mssolid")]
+    let brand = include_bytes!("../../../assets/brands/mssolid/app.png").as_slice();
+    #[cfg(any(feature = "brand-hasisolid", feature = "brand-mssolid"))]
+    let rgba = {
+        let image = image::load_from_memory_with_format(brand, image::ImageFormat::Png).map_err(|e| format!("icon: {e}"))?;
+        let dimension = u32::try_from(size).map_err(|e| format!("icon: {e}"))?;
+        image.resize_exact(dimension, dimension, image::imageops::FilterType::Lanczos3).to_rgba8().into_raw()
+    };
+    #[cfg(not(any(feature = "brand-hasisolid", feature = "brand-mssolid")))]
+    let rgba = app_icon::rgba(size)?;
+    solidcraft_engine::render::png(size, size, rgba).ok_or_else(|| "icon: PNG encoding failed".to_string())
 }
 
 /// A Windows icon file holding PNG images (Vista and later read these).

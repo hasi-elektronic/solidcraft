@@ -1,0 +1,51 @@
+{
+  "en": {
+    "help.cli_not_found": "{cli} was not found next to {product}; run `{cli} mcp setup` from a terminal.",
+    "update.prefs_product_packages": "Version {version}. Automatic updates are disabled; update using the product's installation packages.",
+    "ui.agent_mcp_no_tools": "No {product} tools are available in this session.",
+    "ui.agent_mcp_stopped": "The {product} tools stopped.",
+    "ui.agent_mcp_timeout": "The {product} tools did not answer."
+  },
+  "de": {
+    "help.cli_not_found": "{cli} wurde nicht gefunden. Führen Sie `{cli} mcp setup` in einem Terminal aus, um {product} mit KI-Assistenten zu verbinden.",
+    "update.prefs_product_packages": "Version {version}. Automatische Updates sind deaktiviert; aktualisieren Sie über die Installationspakete des Produkts.",
+    "ui.agent_mcp_no_tools": "In dieser Sitzung sind keine {product}-Werkzeuge verfügbar.",
+    "ui.agent_mcp_stopped": "Die {product}-Werkzeuge wurden beendet.",
+    "ui.agent_mcp_timeout": "Die {product}-Werkzeuge haben nicht geantwortet."
+  },
+  "ar": {
+    "help.cli_not_found": "لم يتم العثور على {cli}. شغّل `{cli} mcp setup` في الطرفية لربط {product} بمساعدي الذكاء الاصطناعي.",
+    "update.prefs_product_packages": "الإصدار {version}. التحديثات التلقائية معطلة؛ استخدم حزم تثبيت المنتج للتحديث.",
+    "ui.agent_mcp_no_tools": "لا تتوفر أدوات {product} في هذه الجلسة.",
+    "ui.agent_mcp_stopped": "توقفت أدوات {product}.",
+    "ui.agent_mcp_timeout": "لم تستجب أدوات {product}."
+  },
+  "he": {
+    "help.cli_not_found": "{cli} לא נמצא. יש להריץ `{cli} mcp setup` במסוף כדי לחבר את {product} לעוזרי בינה מלאכותית.",
+    "update.prefs_product_packages": "גרסה {version}. העדכונים האוטומטיים מושבתים; יש לעדכן באמצעות חבילות ההתקנה של המוצר.",
+    "ui.agent_mcp_no_tools": "כלי {product} אינם זמינים בהפעלה זו.",
+    "ui.agent_mcp_stopped": "כלי {product} הופסקו.",
+    "ui.agent_mcp_timeout": "כלי {product} לא הגיבו."
+  },
+  "ja": {
+    "help.cli_not_found": "{cli} が見つかりません。{product} を AI アシスタントに接続するには、ターミナルで `{cli} mcp setup` を実行してください。",
+    "update.prefs_product_packages": "バージョン {version}。自動更新は無効です。製品のインストールパッケージを使用して更新してください。",
+    "ui.agent_mcp_no_tools": "このセッションでは {product} のツールを利用できません。",
+    "ui.agent_mcp_stopped": "{product} のツールが停止しました。",
+    "ui.agent_mcp_timeout": "{product} のツールが応答しませんでした。"
+  },
+  "vi": {
+    "help.cli_not_found": "Không tìm thấy {cli}. Chạy `{cli} mcp setup` trong terminal để kết nối {product} với các trợ lý AI.",
+    "update.prefs_product_packages": "Phiên bản {version}. Cập nhật tự động đã tắt; hãy cập nhật bằng gói cài đặt của sản phẩm.",
+    "ui.agent_mcp_no_tools": "Không có công cụ {product} trong phiên này.",
+    "ui.agent_mcp_stopped": "Các công cụ {product} đã dừng.",
+    "ui.agent_mcp_timeout": "Các công cụ {product} không phản hồi."
+  },
+  "zh": {
+    "help.cli_not_found": "未找到 {cli}。请在终端中运行 `{cli} mcp setup`，将 {product} 连接到 AI 助手。",
+    "update.prefs_product_packages": "版本 {version}。自动更新已关闭；请使用产品安装包进行更新。",
+    "ui.agent_mcp_no_tools": "此会话中没有可用的 {product} 工具。",
+    "ui.agent_mcp_stopped": "{product} 工具已停止。",
+    "ui.agent_mcp_timeout": "{product} 工具未响应。"
+  }
+}

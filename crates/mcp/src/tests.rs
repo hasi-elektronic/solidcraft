@@ -114,7 +114,8 @@ fn handshake_and_tools_list() {
     let init =
         call(&mut s, 1, "initialize", json!({"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}));
     assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(init["result"]["serverInfo"]["name"], "solidcraft");
+    assert_eq!(init["result"]["serverInfo"]["name"], solidcraft_engine::product::PRODUCT.xdg_folder);
+    assert_eq!(init["result"]["serverInfo"]["version"], solidcraft_engine::product::PRODUCT.version);
     assert!(init["result"]["capabilities"]["tools"].is_object());
     assert!(init["result"]["instructions"].as_str().unwrap().contains("headless"));
     // An unknown version gets ours.

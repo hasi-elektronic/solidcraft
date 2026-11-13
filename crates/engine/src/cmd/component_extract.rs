@@ -17,11 +17,111 @@ use serde_json::{Value, json};
 use solidcraft_doc::{DesignLink, Document, FeatureKind, ModelBody, ModelState};
 use solidcraft_geom::Vec3;
 
-use super::{absolute, component_key, file_sha256, inherit_properties, resolve, session_bodies, stored};
+#[cfg(not(windows))]
+use super::file_sha256;
+use super::{absolute, component_key, inherit_properties, resolve, session_bodies, stored};
 use crate::params::{bad, str_};
 use crate::{EngineError, Result, Session};
 
 const CMD: &str = "component.extract";
+
+/// Publish a complete design at a new path without ever replacing an existing file.
+#[cfg(windows)]
+fn save_new_part(part: &Session, file: &Path) -> Result<(String, Option<String>)> {
+    use std::io::Write;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::path::{Component, PathBuf, Prefix};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let shown = file.to_string_lossy();
+    solidcraft_io::vfs::check(&shown).map_err(|e| EngineError::Other(e.to_string()))?;
+    let bytes = solidcraft_io::write_design_container(&part.design_at(Some(&shown)))?;
+    let digest = DesignLink::file_digest(&bytes);
+    let parent = file.parent().ok_or_else(|| bad(CMD, "the target has no parent directory"))?;
+    let mut components = file.components();
+    let prefix = match components.next() {
+        Some(Component::Prefix(p))
+            if matches!(p.kind(), Prefix::Disk(_) | Prefix::UNC(_, _) | Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _)) =>
+        {
+            p
+        }
+        _ => return Err(bad(CMD, "the target must be an absolute local or network path")),
+    };
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return Err(bad(CMD, "the target must have a root directory"));
+    }
+    let parts: Vec<_> = components
+        .map(|p| match p {
+            Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(|| bad(CMD, "the target path contains an invalid component"))?;
+    if parts.is_empty() {
+        return Err(bad(CMD, "the target has no filename"));
+    }
+    for part in &parts {
+        let name = part.to_str().ok_or_else(|| bad(CMD, "invalid target encoding"))?;
+        let base = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL");
+        let numbered_device = ["COM", "LPT"]
+            .iter()
+            .any(|p| base.strip_prefix(p).is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")));
+        if name.ends_with(['.', ' ']) || reserved || numbered_device || name.chars().any(|c| c < ' ' || "<>:\"|?*".contains(c)) {
+            return Err(bad(CMD, "invalid or reserved target path component"));
+        }
+    }
+    let mut current = PathBuf::from(prefix.as_os_str());
+    current.push("\\");
+    let mut directory_locks = Vec::new();
+    for step in std::iter::once(None).chain(parts.iter().take(parts.len() - 1).map(Some)) {
+        if let Some(name) = step {
+            current.push(name);
+        }
+        let dir = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .custom_flags(0x0200_0000 | 0x0020_0000)
+            .open(&current)
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        let attrs = dir.metadata().map_err(|e| EngineError::Other(e.to_string()))?.file_attributes();
+        if attrs & 0x400 != 0 || attrs & 0x10 == 0 {
+            return Err(bad(CMD, "a target directory is a reparse point or is not a directory"));
+        }
+        directory_locks.push(dir);
+    }
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| EngineError::Other(e.to_string()))?.as_nanos();
+    let temporary = parent.join(format!(".solidcraft-extract-{}-{nanos}-{sequence}.tmp", std::process::id()));
+    let mut temp = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(1)
+        .custom_flags(0x0400_0000)
+        .open(&temporary)
+        .map_err(|e| EngineError::Other(e.to_string()))?;
+    let written = temp.write_all(&bytes).and_then(|_| temp.sync_all());
+    let result = written.and_then(|()| std::fs::hard_link(&temporary, file));
+    drop(temp);
+    let cleanup = match std::fs::symlink_metadata(&temporary) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(_) => Some(format!("temporary file remains: {}", temporary.display())),
+        Err(e) => Some(format!("cannot check temporary file {}: {e}", temporary.display())),
+    };
+    if let Err(e) = result {
+        return Err(EngineError::Other(format!(
+            "could not publish new part {}: {e}{}",
+            file.display(),
+            cleanup.as_ref().map(|c| format!("; {c}")).unwrap_or_default()
+        )));
+    }
+    Ok((digest, cleanup))
+}
+
+#[cfg(not(windows))]
+fn save_new_part(_part: &Session, _file: &Path) -> Result<(String, Option<String>)> {
+    Err(bad(CMD, "safe extraction from a shared STEP import is currently available on Windows only"))
+}
 
 /// Drop the placements down to and including the extracted component's own from `path`, so it
 /// starts at the new design's root.
@@ -551,12 +651,165 @@ impl Session {
     /// Whether component `id` can leave the design for a file of its own or a link: what
     /// `component.extract` and `component.replace_with_link` check before they build anything.
     pub fn can_extract(&self, id: u64) -> bool {
-        scope(self, id, CMD).is_ok()
+        scope(self, id, CMD).is_ok() || shared_import(self, id).is_some_and(|(_, _, body)| !unsupported_part_data(self, id, &body))
     }
+
+    /// Build a separate editable session without saving or modifying the assembly.
+    /// The caller must explicitly apply any later edits back to the assembly.
+    pub fn component_session(&self, id: u64) -> Result<(Session, Vec<String>)> {
+        if let Some((_, _, body)) = shared_import(self, id) {
+            if unsupported_part_data(self, id, &body) {
+                return Err(bad(CMD, "configurations, reference images, part properties, material or appearance cannot yet be transferred safely"));
+            }
+            let name = self.doc.components.iter().find(|c| c.id == id).map(|c| c.name.as_str()).unwrap_or(&body.name);
+            return imported_part_session(self, &body, name).map(|part| (part, Vec::new()));
+        }
+        let sc = scope(self, id, CMD)?;
+        part_design(self, &sc, &sc.name, CMD)
+    }
+}
+
+/// A single, unmodified part of a STEP assembly's shared import. Restrict this path to a
+/// uniquely named source body; its occurrences keep sharing the linked definition.
+fn shared_import(s: &Session, comp: u64) -> Option<(u64, usize, ModelBody)> {
+    if comp == 0
+        || s.doc.links.contains_key(&comp)
+        || s.doc.parts.contains_key(&comp)
+        || !s.pending_moves.is_empty()
+        || s.doc.marker.is_some_and(|m| m < s.doc.features.len())
+        || !s.doc.placements().iter().any(|(id, _, _)| *id == comp)
+        || s.doc.components.iter().any(|c| c.id != comp && s.doc.component_within(c.id, comp))
+    {
+        return None;
+    }
+    let state = s.model.state();
+    let bodies: Vec<_> = state.bodies.iter().filter(|b| s.doc.model_body_component(b) == comp).collect();
+    let [body] = bodies.as_slice() else { return None };
+    if body.body.is_mesh() || s.doc.features.iter().any(|f| f.component == comp) {
+        return None;
+    }
+    let feature = s.doc.feature(body.feature)?;
+    let FeatureKind::Import { .. } = &feature.kind else { return None };
+    // STEP body labels need not be unique. The evaluator assigns unique model names in source
+    // order; use that evaluated identity and the import's skip-aware slots, not the raw label.
+    let result = s.model.result(feature.id)?;
+    if result.error.is_some() || result.skipped || result.stale {
+        return None;
+    }
+    let made: Vec<_> = result.state.bodies.iter().filter(|b| b.feature == feature.id).collect();
+    let slots = feature.body_name_slots(made.len());
+    let matches: Vec<_> = made.iter().zip(slots).filter(|(made, _)| made.name == body.name).map(|(_, slot)| slot).collect();
+    let [index] = matches.as_slice() else { return None };
+    Some((feature.id, *index, (**body).clone()))
+}
+
+fn unsupported_part_data(s: &Session, comp: u64, body: &ModelBody) -> bool {
+    !s.doc.configs.is_empty()
+        || s.doc.canvases.iter().any(|canvas| s.doc.component_within(canvas.component, comp))
+        || s.doc.components.iter().find(|c| c.id == comp).is_some_and(|c| !c.metadata.is_empty() || !c.properties.is_empty())
+        || s.doc.materials.contains_key(&body.name)
+        || s.doc.appearances.bodies.contains_key(&body.name)
+        || s.doc.appearances.faces.iter().any(|look| look.body == body.name)
+        || s.doc.appearances.components.keys().any(|id| s.doc.component_within(comp, *id))
+}
+
+/// Prepare the local STEP geometry as a separate in-memory design.
+fn imported_part_session(s: &Session, body: &ModelBody, name: &str) -> Result<Session> {
+    let offset = s.doc.model_body_offset(body).copied().unwrap_or(solidcraft_doc::IDENTITY);
+    let local = solidcraft_kernel::transform_matrix(&body.body, offset)?;
+    let step = solidcraft_kernel::step_export_bodies(
+        &[solidcraft_kernel::ExportBody { name: body.name.clone(), body: &local, color: local.color() }],
+        &solidcraft_kernel::StepHeader::default(),
+    )?;
+    let mut part = Session::default();
+    part.doc_mut().name = name.to_string();
+    part.doc_mut().units = s.doc.units.clone();
+    let feature = part
+        .doc_mut()
+        .add_feature(FeatureKind::Import { file: body.name.clone(), step: step.into(), components: Vec::new(), skip: Vec::new() }, None)?;
+    if let Some(f) = part.doc_mut().feature_mut(feature) {
+        f.body_names = vec![body.name.clone()];
+    }
+    part.refresh();
+    if let Some(error) = part.model.result(feature).and_then(|r| r.error.as_ref()) {
+        return Err(bad(CMD, format!("the imported part cannot be opened: {error}")));
+    }
+    Ok(part)
+}
+
+fn extract_shared_import(s: &mut Session, comp: u64, p: &Value) -> Result<Value> {
+    let (source, index, body) = shared_import(s, comp).ok_or_else(|| bad(CMD, "the imported part cannot be separated safely"))?;
+    if unsupported_part_data(s, comp, &body) {
+        return Err(bad(CMD, "configurations, reference images, part properties, material or appearance cannot yet be transferred safely"));
+    }
+    let given = str_(p, "path").filter(|x| !x.trim().is_empty() && x.len() < 4096).ok_or_else(|| bad(CMD, "`path` is required"))?;
+    let file = absolute(Path::new(given));
+    if !solidcraft_io::is_design_container_path(&file) || s.path.as_deref().is_some_and(|own| absolute(Path::new(own)) == file) {
+        return Err(bad(CMD, "choose a different .sc file for the part"));
+    }
+    let name = file.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| body.name.clone());
+    let part = imported_part_session(s, &body, &name)?;
+    let shown = file.display().to_string();
+    let (_, sf, faces, _, _) = session_bodies(&part, &shown)?;
+    if sf.body_names.len() != 1 {
+        return Err(bad(CMD, "the imported part cannot be represented as one linked body"));
+    }
+    let before = Before::take(s);
+    let old = s.model.state();
+    let at = s.doc.feature_index(source).ok_or_else(|| bad(CMD, "the source import is missing"))? + 1;
+    // Removing one source body must not renumber other bodies that shared its raw STEP label.
+    let made: Vec<String> = s.model.result(source).ok_or_else(|| bad(CMD, "the source import is missing"))?.state.bodies.iter()
+        .filter(|b| b.feature == source).map(|b| b.name.clone()).collect();
+    let Some(f) = s.doc_mut().feature_mut(source) else { return Err(bad(CMD, "the source import is missing")) };
+    let previous_names = f.body_names.clone();
+    f.pin_body_names(&made);
+    if f.body_names.len() < previous_names.len() {
+        f.body_names.extend_from_slice(&previous_names[f.body_names.len()..]);
+    }
+    let FeatureKind::Import { skip, .. } = &mut f.kind else { return Err(bad(CMD, "the source is not a STEP import")) };
+    skip.push(index as u64);
+    s.doc_mut().body_components.remove(&body.name);
+    s.doc_mut().body_offsets.remove(&body.name);
+    let id = s.doc_mut().add_feature(sf.kind, None)?;
+    if let Some(i) = s.doc.feature_index(id) {
+        let f = s.doc_mut().features.remove(i);
+        let position = at.min(s.doc.features.len());
+        s.doc_mut().features.insert(position, f);
+    }
+    if let Some(f) = s.doc_mut().feature_mut(id) {
+        f.component = comp;
+        f.body_names = vec![body.name.clone()];
+        f.link_faces = faces;
+    }
+    s.doc_mut().links.insert(comp, DesignLink { path: shown.clone(), feature: id, ..Default::default() });
+    s.refresh();
+    let own = s.doc.occurrences.iter().filter(|o| o.component == comp).map(|o| o.id).collect();
+    rename_joint_faces(s, &old, id, &own);
+    s.refresh();
+    let mut names_before: Vec<_> = before.world.bodies.iter().map(|b| b.name.clone()).collect();
+    let mut names_after: Vec<_> = s.world_state().bodies.iter().map(|b| b.name.clone()).collect();
+    names_before.sort();
+    names_after.sort();
+    if names_before != names_after {
+        return Err(bad(CMD, "separating this part would change assembly body names"));
+    }
+    let warnings = before.check(s, CMD, &body.name)?;
+    if !warnings.is_empty() {
+        return Err(bad(CMD, format!("the imported part cannot be separated without changing assembly joints: {}", warnings.join("; "))));
+    }
+    let (digest, cleanup) = save_new_part(&part, &file)?;
+    if let Some(link) = s.doc_mut().links.get_mut(&comp) {
+        link.file_sha256 = Some(digest);
+    }
+    Ok(json!({"component": comp, "feature": id, "path": stored(s.path.as_deref(), &file), "file": shown,
+        "bodies": [body.name], "notices": [], "warnings": cleanup.into_iter().collect::<Vec<_>>(), "copies": []}))
 }
 
 pub(super) fn extract(s: &mut Session, p: &Value) -> Result<Value> {
     let comp = component_key(s, p, "component", CMD)?;
+    if scope(s, comp, CMD).is_err() && shared_import(s, comp).is_some() {
+        return extract_shared_import(s, comp, p);
+    }
     let sc = scope(s, comp, CMD)?;
     let given = str_(p, "path").filter(|x| !x.trim().is_empty() && x.len() < 4096).ok_or_else(|| bad(CMD, "`path` is required"))?;
     let file = absolute(Path::new(given));
@@ -610,12 +863,24 @@ pub(super) fn extract(s: &mut Session, p: &Value) -> Result<Value> {
     let copies = copies_of(s, comp)?;
 
     part.path = s.path.clone();
-    part.execute("file.save", &json!({"path": shown}))?;
+    #[cfg(windows)]
+    let (digest, cleanup) = {
+        let (digest, cleanup) = save_new_part(&part, &file)?;
+        (Some(digest), cleanup)
+    };
+    #[cfg(not(windows))]
+    let (digest, cleanup) = {
+        part.execute("file.save", &json!({"path": shown}))?;
+        (file_sha256(&file, s.path.as_deref()), None)
+    };
+    if let Some(warning) = cleanup {
+        warnings.push(warning);
+    }
     // The link keeps what the new file holds, as Insert Design's does (#9739).
-    if let Some(read) = file_sha256(&file, s.path.as_deref())
+    if let Some(digest) = digest
         && let Some(link) = s.doc_mut().links.get_mut(&comp)
     {
-        link.file_sha256 = Some(read);
+        link.file_sha256 = Some(digest);
     }
     Ok(json!({"component": comp, "feature": id, "path": path, "file": shown, "bodies": sc.bodies, "notices": notices, "warnings": warnings,
         "copies": named(s, &copies)}))
@@ -717,6 +982,117 @@ pub(super) fn replace_with_link(s: &mut Session, p: &Value) -> Result<Value> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// STEP products can have different components whose underlying bodies share a label.
+    /// The fixture is provided outside the repository and is never modified.
+    #[test]
+    fn customer_step_components_with_reused_body_labels_are_distinct() {
+        let Ok(source) = std::env::var("SOLIDCRAFT_DUPLICATE_LABEL_STEP") else { return };
+        let names = std::env::var("SOLIDCRAFT_DUPLICATE_LABEL_COMPONENTS").unwrap();
+        let mut session = Session::default();
+        run(&mut session, "doc.open", json!({"path": source}));
+        let before = session.doc.clone();
+        let undo = session.undo.len();
+        for name in names.split('|') {
+            let component = session.doc.components.iter().find(|c| c.name == name).unwrap().id;
+            assert!(session.can_extract(component), "{name} must resolve to its own evaluated STEP body");
+            let (part, notices) = session.component_session(component).unwrap();
+            assert!(notices.is_empty());
+            assert!(part.path.is_none(), "opening the part does not need a file");
+            assert_eq!(part.world_state().bodies.len(), 1);
+            assert_eq!(part.doc.name, name);
+            assert_eq!(serde_json::to_value(&part.doc.units).unwrap(), serde_json::to_value(&session.doc.units).unwrap());
+            let (_, _, source_body) = shared_import(&session, component).unwrap();
+            let offset = session.doc.model_body_offset(&source_body).copied().unwrap_or(solidcraft_doc::IDENTITY);
+            let state = part.world_state();
+            assert!(same_shape(&source_body, &offset, &state.bodies[0], &solidcraft_doc::IDENTITY).unwrap(), "{name} geometry and placement");
+            assert!(std::sync::Arc::ptr_eq(&before, &session.doc), "opening a part leaves its assembly untouched");
+            assert_eq!(session.undo.len(), undo);
+        }
+    }
+
+    #[test]
+    fn extracting_a_unique_part_from_a_shared_step_import_preserves_the_assembly() {
+        let dir = folder("extract-shared-step");
+        let step = dir.join("assembly.step");
+        let part = dir.join("panel.sc");
+        let mut original = Session::default();
+        run(&mut original, "component.create", json!({"name":"Panel"}));
+        run(&mut original, "solid.box", json!({"length":20,"width":30,"height":2,"body_name":"PanelBody"}));
+        run(&mut original, "component.activate", json!({"component":0}));
+        run(&mut original, "component.create", json!({"name":"Other"}));
+        run(&mut original, "solid.box", json!({"corner":[50,0,0],"length":5,"width":5,"height":5,"body_name":"OtherBody"}));
+        run(&mut original, "file.export", json!({"path":step,"format":"step"}));
+        let mut imported = Session::default();
+        run(&mut imported, "doc.open", json!({"path":step}));
+        let panel = imported.doc.components.iter().find(|c| c.name == "Panel").unwrap().id;
+        let before = shapes(&imported);
+        assert!(imported.can_extract(panel));
+        let snapshot = imported.doc.clone();
+        let (preview, notices) = imported.component_session(panel).unwrap();
+        assert!(notices.is_empty() && preview.path.is_none());
+        assert_eq!(preview.world_state().bodies.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(&snapshot, &imported.doc));
+        let assembly = dir.join("assembly.sc");
+        run(&mut imported, "file.save", json!({"path":assembly}));
+        let alias = dir.join("assembly-alias.sc");
+        std::fs::hard_link(&assembly, &alias).unwrap();
+        let saved = std::fs::read(&assembly).unwrap();
+        let original = serde_json::to_value(&*imported.doc).unwrap();
+        assert!(imported.execute("component.extract", &json!({"component":panel,"path":alias})).is_err());
+        assert_eq!(std::fs::read(&assembly).unwrap(), saved);
+        assert_eq!(serde_json::to_value(&*imported.doc).unwrap(), original);
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::write(&part, b"existing data").unwrap();
+        let document = serde_json::to_value(&*imported.doc).unwrap();
+        let undo = imported.undo.len();
+        assert!(imported.execute("component.extract", &json!({"component":panel,"path":part})).is_err());
+        assert_eq!(std::fs::read(&part).unwrap(), b"existing data");
+        assert_eq!(serde_json::to_value(&*imported.doc).unwrap(), document);
+        assert_eq!(imported.undo.len(), undo);
+        std::fs::remove_file(&part).unwrap();
+        run(&mut imported, "component.extract", json!({"component":panel,"path":part}));
+        assert_eq!(shapes(&imported), before);
+        assert!(imported.doc.links.contains_key(&panel));
+        let mut reopened = Session::default();
+        run(&mut reopened, "doc.open", json!({"path":part}));
+        assert_eq!(reopened.world_state().bodies.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Optional customer-provided STEP fixture; writes only to the isolated test directory.
+    #[test]
+    fn extracting_a_unique_part_from_customer_step_and_updating_its_link() {
+        let Ok(source) = std::env::var("SOLIDCRAFT_SAMPLE_STEP") else { return };
+        let component_name = std::env::var("SOLIDCRAFT_SAMPLE_COMPONENT").unwrap();
+        let dir = folder("extract-customer-step");
+        let assembly = dir.join("assembly.sc");
+        let part = dir.join("part.sc");
+        let mut s = Session::default();
+        run(&mut s, "doc.open", json!({"path":source}));
+        let component = s.doc.components.iter().find(|c| c.name == component_name).unwrap().id;
+        run(&mut s, "file.save", json!({"path":assembly}));
+        let before = shapes(&s);
+        let count = s.world_state().bodies.len();
+        let placements = s.doc.placements().iter().filter(|(id, _, _)| *id == component).count();
+        assert!(placements > 0);
+        assert!(s.can_extract(component), "the selected STEP part must be eligible");
+        run(&mut s, "component.extract", json!({"component":component,"path":part}));
+        assert_eq!(shapes(&s), before, "extraction preserves all assembly geometry");
+        let mut single = Session::default();
+        run(&mut single, "doc.open", json!({"path":part}));
+        assert_eq!(single.world_state().bodies.len(), 1);
+        run(&mut single, "solid.box", json!({"corner":[3000,3000,3000],"length":10,"width":10,"height":10,"operation":"new"}));
+        run(&mut single, "file.save", json!({"path":part,"overwrite":true}));
+        let changed = run(&mut s, "component.update_links", json!({"components":[component]}));
+        assert!(changed["failed"].as_array().is_none_or(Vec::is_empty), "{changed}");
+        assert_eq!(s.world_state().bodies.len(), count + placements, "the updated part reaches every placement in the assembly");
+        run(&mut s, "file.save", json!({"path":assembly,"overwrite":true}));
+        let mut reopened = Session::default();
+        run(&mut reopened, "doc.open", json!({"path":assembly}));
+        assert_eq!(shapes(&reopened), shapes(&s));
+        let _ = std::fs::remove_dir_all(dir);
+    }
     use std::path::PathBuf;
 
     fn run(s: &mut Session, id: &str, p: Value) -> Value {

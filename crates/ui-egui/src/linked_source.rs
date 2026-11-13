@@ -31,7 +31,7 @@ pub(crate) fn start(app: &mut SolveApp, component: u64) {
     if app.file_picker_busy() || app.file_load.busy() {
         return;
     }
-    if !app.session.doc.links.contains_key(&component) {
+    if !app.session.doc.links.contains_key(&component) || app.session.path.is_none() {
         app.set_status(app.tr_label("ui.relink_not_linked").to_string(), true);
         return;
     }
@@ -66,6 +66,41 @@ pub(crate) fn start(app: &mut SolveApp, component: u64) {
 
 /// Ask where the component's design goes, then move its history there and link it.
 pub(crate) fn extract(app: &mut SolveApp, component: u64) {
+    extract_impl(app, component, None);
+}
+
+/// Open a component view without first saving the assembly or creating a part file.
+pub(crate) fn open_part(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>) {
+    open_selected(app, component, path, None);
+}
+
+/// Open only the chosen body of a component, retaining its exact occurrence path.
+pub(crate) fn open_body(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>, body: String) {
+    open_selected(app, component, path, Some(body));
+}
+
+fn open_selected(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>, body: Option<String>) {
+    if let Err(why) = crate::edit_in_place::check_activity(app) {
+        app.set_status(why, true);
+        return;
+    }
+    let linked = app.session.doc.links.contains_key(&component);
+    if body.is_some() || !linked || app.session.path.is_none() {
+        match crate::documents::open_component_view(app, component, path, body) {
+            Err(error) => app.set_status(error, true),
+            Ok(()) if linked => app.set_status(app.tr("ui.part_view_link_scope").to_string(), false),
+            Ok(()) => {}
+        }
+        return;
+    }
+    if app.session.doc.links.contains_key(&component) {
+        crate::edit_in_place::open_solo(app, component, path, false);
+    } else {
+        extract_impl(app, component, Some(path));
+    }
+}
+
+fn extract_impl(app: &mut SolveApp, component: u64, open_after: Option<Option<Vec<u64>>>) {
     if app.file_picker_busy() || app.file_load.busy() {
         return;
     }
@@ -91,6 +126,9 @@ pub(crate) fn extract(app: &mut SolveApp, component: u64) {
                 .collect();
             if !copies.is_empty() {
                 app.menu.link_copies = Some(Copies { linked: component, document: app.session.doc.clone(), copies });
+            }
+            if let Some(path) = open_after {
+                crate::edit_in_place::open_solo(app, component, path, true);
             }
         }
     });

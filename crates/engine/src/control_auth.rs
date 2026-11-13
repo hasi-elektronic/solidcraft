@@ -65,7 +65,12 @@ fn control_dir() -> Option<PathBuf> {
 
 /// The folder `SOLIDCRAFT_CONTROL_DIR` names in place of the default one.
 fn custom_control_dir() -> Option<std::ffi::OsString> {
-    solidcraft_geom::env::var_os("CONTROL_DIR").filter(|d| !d.is_empty())
+    let value = if crate::product::PRODUCT.branded {
+        std::env::var_os(format!("{}_CONTROL_DIR", crate::product::PRODUCT.name.to_ascii_uppercase()))
+    } else {
+        solidcraft_geom::env::var_os("CONTROL_DIR")
+    };
+    value.filter(|d| !d.is_empty())
 }
 
 /// The token file of the app listening on `port`: `<data folder>/control/<port>.token`
@@ -121,7 +126,12 @@ fn remove_discovery(current: &Path, file: &Path, port: u16, token: &str) {
 /// A token set on purpose with `SOLIDCRAFT_CONTROL_TOKEN` (test harnesses, sandboxed packages
 /// whose data folder the client can't see), if it is long enough.
 pub fn env_token() -> Option<String> {
-    solidcraft_geom::env::var("CONTROL_TOKEN").map(|t| t.trim().to_string()).filter(|t| t.len() >= MIN_TOKEN_LEN)
+    let token = if crate::product::PRODUCT.branded {
+        std::env::var(format!("{}_CONTROL_TOKEN", crate::product::PRODUCT.name.to_ascii_uppercase())).ok()
+    } else {
+        solidcraft_geom::env::var("CONTROL_TOKEN")
+    };
+    token.map(|t| t.trim().to_string()).filter(|t| t.len() >= MIN_TOKEN_LEN)
 }
 
 /// The token a client sends to the app on `port`: `explicit` (`--token`), else

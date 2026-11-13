@@ -22,6 +22,10 @@ use crate::theme::Tokens;
 /// The assembly around a part being edited in place.
 #[derive(Clone)]
 pub struct PartContext {
+    /// Do not display the assembly around a separately opened part.
+    pub solo: bool,
+    /// This edit first extracted the part into a newly created linked file.
+    pub extracted: bool,
     /// The assembly's file and name.
     pub assembly: String,
     pub assembly_name: String,
@@ -55,6 +59,11 @@ struct Refresh {
 #[derive(Default)]
 pub struct EditInPlace {
     pub active: Option<PartContext>,
+    /// Open only the part, without the faded assembly context.
+    solo: bool,
+    just_extracted: bool,
+    /// Resume opening a part after the user saves an unsaved assembly.
+    pub(crate) open_after_assembly_save: Option<(u64, String, u64, Option<Vec<u64>>)>,
     pending: Option<PartContext>,
     /// Finish Edit is waiting for the save of the part at this file.
     finish_after_save: Option<String>,
@@ -188,13 +197,30 @@ fn snapshot(session: &Session, component: u64, placement: &[u64]) -> Option<(usi
 /// as the window does it (a double-click, Edit in Place in its menu): `component.edit_in_place`,
 /// with the questions an open can ask (a network location, a design open elsewhere) asked.
 pub(crate) fn open(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>) {
+    let _ = open_with_result(app, component, path);
+}
+
+fn open_with_result(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>) -> bool {
     let mut params = json!({ "component": component });
     if let Some(path) = path {
         params["path"] = json!(path);
     }
     app.edit_in_place.ask = true;
-    let _ = app.run("component.edit_in_place", params);
+    let opened = app.run("component.edit_in_place", params).is_ok();
     app.edit_in_place.ask = false;
+    opened
+}
+
+/// Open the linked component in its own tab while retaining the assembly update workflow.
+pub(crate) fn open_solo(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>, extracted: bool) {
+    app.edit_in_place.solo = true;
+    app.edit_in_place.just_extracted = extracted;
+    let opened = open_with_result(app, component, path);
+    app.edit_in_place.solo = false;
+    app.edit_in_place.just_extracted = false;
+    if !opened && extracted {
+        app.set_status(app.tr("ui.open_part_extracted_not_opened").to_string(), true);
+    }
 }
 
 /// `component.edit_in_place` ran: `result` names the component and its placement, and the window
@@ -222,13 +248,18 @@ pub(crate) fn command_ran(app: &mut SolveApp, result: &Value) -> Result<bool, St
 }
 
 /// What holds up entering an edit from the design shown.
-fn check_enter(app: &SolveApp) -> Result<(), String> {
+pub(crate) fn check_activity(app: &SolveApp) -> Result<(), String> {
     if busy(app) {
         return Err(busy_reason(app));
     }
     if working(app) {
         return Err(crate::i18n::tr("ui.edit_in_place_busy").to_string());
     }
+    Ok(())
+}
+
+pub(crate) fn check_enter(app: &SolveApp) -> Result<(), String> {
+    check_activity(app)?;
     if app.session.path.is_none() {
         return Err(crate::i18n::tr("ui.edit_in_place_save_first").to_string());
     }
@@ -238,7 +269,14 @@ fn check_enter(app: &SolveApp) -> Result<(), String> {
 /// Open the design the linked component `component` comes from, with the assembly around it as
 /// its placement `path` (default: its first) puts it (`ask`: with the open's questions).
 fn enter(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>, ask: bool) -> Result<(), String> {
-    let (context, link) = prepare(app, component, path, ask)?;
+    let (mut context, link) = prepare(app, component, path, ask)?;
+    context.extracted = app.edit_in_place.just_extracted;
+    if app.edit_in_place.solo {
+        context.solo = true;
+        context.triangles = Arc::new(Vec::new());
+        context.bounds = Aabb3::default();
+        context.bodies = 0;
+    }
     app.edit_in_place.pending = Some(context);
     crate::network_prompt::open_linked(app, &link);
     Ok(())
@@ -274,11 +312,21 @@ fn prepare(app: &mut SolveApp, component: u64, path: Option<Vec<u64>>, ask: bool
         }
     }
     let placement = path.unwrap_or_else(|| app.session.doc.first_path(component));
-    let Some((bodies, triangles, bounds)) = snapshot(&app.session, component, &placement) else {
-        return Err(app.tr_label("ui.relink_not_linked").to_string());
+    let (bodies, triangles, bounds) = if app.edit_in_place.solo {
+        if app.session.occurrence_placement(&placement).is_err() {
+            return Err(app.tr_label("ui.relink_not_linked").to_string());
+        }
+        (0, Vec::new(), Aabb3::default())
+    } else {
+        let Some(snapshot) = snapshot(&app.session, component, &placement) else {
+            return Err(app.tr_label("ui.relink_not_linked").to_string());
+        };
+        snapshot
     };
     let opened = crate::documents::session_at(app, &part).is_none();
     let context = PartContext {
+        solo: false,
+        extracted: false,
         assembly,
         assembly_name: app.session.doc.name.clone(),
         part,
@@ -305,6 +353,23 @@ pub(crate) fn attach(app: &mut SolveApp) {
     }
     app.edit_in_place.active = Some(context);
     app.fit_view();
+    warn_shared(app);
+}
+
+/// Shared occurrences all read the same saved part; surface that before editing.
+pub(crate) fn warn_shared(app: &mut SolveApp) {
+    if app.session.read_only || app.status.as_ref().is_some_and(|(_, _, error)| *error) {
+        return;
+    }
+    let shared = app.edit_in_place.active.as_ref().is_some_and(|context| {
+        context.solo
+            && app.session.path.as_deref().is_some_and(|p| crate::documents::same_path(p, &context.part))
+            && crate::documents::session_at(app, &context.assembly)
+                .is_some_and(|s| s.doc.placements().iter().filter(|(id, _, _)| *id == context.component).count() > 1)
+    });
+    if shared {
+        app.set_status(app.tr("ui.open_part_shared").to_string(), false);
+    }
 }
 
 /// The name of the design shown, while it reads its links for a part edited in place (it is
@@ -397,13 +462,20 @@ fn take_refresh(app: &mut SolveApp) {
     crate::documents::record_stamps_at(app, &r.assembly, &r.stamps);
     // Every edit of a part of this assembly, in the tab shown or another, is drawn around anew.
     let of_assembly = |c: &&mut PartContext| crate::documents::same_path(&c.assembly, &r.assembly);
-    let placements: Vec<(u64, Vec<u64>)> =
-        crate::documents::edits_mut(app).into_iter().filter(of_assembly).map(|c| (c.component, c.placement.clone())).collect();
+    let placements: Vec<(u64, Vec<u64>, bool)> =
+        crate::documents::edits_mut(app).into_iter().filter(of_assembly).map(|c| (c.component, c.placement.clone(), c.solo)).collect();
     let snaps: Vec<_> = placements
         .iter()
-        .map(|(component, placement)| crate::documents::session_at(app, &r.assembly).and_then(|s| snapshot(s, *component, placement)))
+        .map(
+            |(component, placement, solo)| {
+                if *solo { None } else { crate::documents::session_at(app, &r.assembly).and_then(|s| snapshot(s, *component, placement)) }
+            },
+        )
         .collect();
     for (context, snap) in crate::documents::edits_mut(app).into_iter().filter(of_assembly).zip(snaps) {
+        if context.solo {
+            continue;
+        }
         if let Some((bodies, triangles, bounds)) = snap {
             (context.bodies, context.triangles, context.bounds) = (bodies, Arc::new(triangles), bounds);
         }
@@ -461,21 +533,56 @@ fn finish_with(app: &mut SolveApp, save: bool) -> Result<bool, String> {
         app.set_status(crate::i18n::tr("ui.edit_in_place_after_turn").to_string(), false);
         return Ok(true);
     }
+    complete_edit(app, false)
+}
+
+/// Close a solo part without saving its current edits, then refresh its assembly from the
+/// existing linked file. This is also used when the part was saved under another name.
+pub(crate) fn discard_solo(app: &mut SolveApp) {
+    if let Err(why) = (|| {
+        if busy(app) || !can_finish(app) || app.agent_chat.state() == crate::agent_chat::State::Busy {
+            return Err(crate::i18n::tr("ui.edit_in_place_busy").to_string());
+        }
+        if let Some(context) = app.edit_in_place.active.as_mut() {
+            context.opened = true;
+        }
+        complete_edit(app, true)
+    })() {
+        app.set_status(why, true);
+    }
+}
+
+fn complete_edit(app: &mut SolveApp, discard: bool) -> Result<bool, String> {
     let Some(context) = app.edit_in_place.active.take() else { return Ok(false) };
     let part_tab = app.docs.active;
-    if !matches!(crate::documents::reuse_path(app, &context.assembly), Ok(true)) {
+    // A solo edit always explicitly refreshes its component below. Avoid the optional
+    // timestamp-based refresh on tab switch so it cannot mask a same-size/same-time save.
+    let auto_update = app.preferences.update_changed_links;
+    if context.solo {
+        app.preferences.update_changed_links = false;
+    }
+    let switched = crate::documents::reuse_path(app, &context.assembly);
+    app.preferences.update_changed_links = auto_update;
+    if !matches!(switched, Ok(true)) {
         let why = crate::i18n::format("ui.edit_in_place_assembly_closed", &[("name", &context.assembly_name)]);
         app.edit_in_place.active = Some(context);
         return Err(why);
     }
     if context.opened {
-        crate::documents::close(app, part_tab, false);
+        crate::documents::close(app, part_tab, discard);
     }
     // Coming back to its tab reads what changed, unless it read nothing (`update_changed_links`
     // off, the web build without file times): then the part is read here.
-    if (!app.preferences.update_changed_links || cfg!(target_arch = "wasm32")) && app.file_load.idle() {
+    if (context.solo || !auto_update || cfg!(target_arch = "wasm32")) && app.file_load.idle() {
         let mut request = crate::file_load::Request::new("", crate::file_load::Kind::UpdateLinks);
-        request.options.insert("component".into(), json!(context.component));
+        // Respect automatic updates for the rest of the assembly while always refreshing
+        // the edited part, even if its file stamp did not change.
+        if context.solo && auto_update {
+            let components: Vec<u64> = app.session.doc.links.keys().copied().collect();
+            request.options.insert("components".into(), json!(components));
+        } else {
+            request.options.insert("component".into(), json!(context.component));
+        }
         request.design = Some(context.assembly);
         let _ = crate::file_load::begin_request(app, request);
     }
@@ -501,8 +608,20 @@ fn can_finish(app: &SolveApp) -> bool {
 /// part's own tab (a save that failed, was cancelled or went elsewhere leaves the edit as it was).
 pub(crate) fn tick(app: &mut SolveApp) {
     take_refresh(app);
+    if app.saving.is_none()
+        && app.file_picker.is_none()
+        && let Some((uid, expected, component, path)) = app.edit_in_place.open_after_assembly_save.take()
+        && app.session.uid == uid
+        && !app.session.is_dirty()
+        && app.session.path.as_deref().is_some_and(|actual| crate::documents::same_path(actual, &expected))
+    {
+        crate::linked_source::open_part(app, component, path);
+    }
     if app.edit_in_place.pending.is_some() && !app.file_load.busy() && app.network_prompt.is_none() && app.lock_prompts.is_empty() {
-        app.edit_in_place.pending = None;
+        let extracted = app.edit_in_place.pending.take().is_some_and(|c| c.extracted);
+        if extracted {
+            app.set_status(app.tr("ui.open_part_extracted_not_opened").to_string(), true);
+        }
     }
     let waiting = app.saving.is_some() || app.file_picker.is_some() || app.disk_prompt || app.tree.capture_prompt.is_some();
     if !waiting && let Some(part) = app.edit_in_place.finish_after_save.take() {
